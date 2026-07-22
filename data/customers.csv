@@ -1,0 +1,9 @@
+customer_id,customer_name,phone,email,origin_city,origin_state,destination_country,destination_city,customer_type,notes
+CUST-001,Janice Williams,305-555-0111,janice.williams@example.com,Miami,FL,Guyana,Georgetown,Repeat,Ships barrels monthly
+CUST-002,Michael Singh,954-555-0182,michael.singh@example.com,Fort Lauderdale,FL,Guyana,Berbice,New,Requested pickup after 5 PM
+CUST-003,Patricia Persaud,786-555-0164,patricia.persaud@example.com,Homestead,FL,Guyana,Essequibo,Repeat,Prefers phone communication
+CUST-004,Andrew Thomas,305-555-0147,andrew.thomas@example.com,Miramar,FL,Trinidad,Port of Spain,New,Commercial shipment inquiry
+CUST-005,Nadia Roberts,561-555-0199,nadia.roberts@example.com,West Palm Beach,FL,Guyana,Linden,Repeat,Usually pays by Zelle
+CUST-006,Kevin Mohammed,305-555-0178,kevin.mohammed@example.com,Doral,FL,Barbados,Bridgetown,New,First-time customer
+CUST-007,Sandra Ali,754-555-0133,sandra.ali@example.com,Hollywood,FL,Guyana,Georgetown,Repeat,Multiple family recipients
+CUST-008,Trevor James,305-555-0129,trevor.james@example.com,Miami Gardens,FL,Jamaica,Kingston,New,Asked for quote before confirming

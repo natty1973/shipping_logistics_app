@@ -1,0 +1,26 @@
+shipment_id,customer_id,customer_name,shipment_date,item_type,quantity,origin_city,origin_state,destination_country,destination_city,current_status,estimated_delivery_date,amount_charged,amount_paid,balance_due,payment_status,notes
+SST-2026-0001,CUST-002,Michael Singh,2026-05-18,Package,1,Fort Lauderdale,FL,Guyana,Berbice,Pickup Scheduled,2026-06-05,40,30,10,Partial,Call customer before pickup
+SST-2026-0002,CUST-004,Andrew Thomas,2026-05-23,Commercial Goods,1,Miramar,FL,Trinidad,Port of Spain,At Warehouse,2026-06-03,250,50,200,Partial,Customer requested delivery confirmation
+SST-2026-0003,CUST-005,Nadia Roberts,2026-05-24,Barrel,3,West Palm Beach,FL,Guyana,Linden,At Warehouse,2026-06-01,385,385,0,Paid,Call customer before pickup
+SST-2026-0004,CUST-008,Trevor James,2026-05-23,Package,1,Miami Gardens,FL,Jamaica,Kingston,Picked Up,2026-06-02,55,25,30,Partial,Call customer before pickup
+SST-2026-0005,CUST-001,Janice Williams,2026-05-19,Barrel,1,Miami,FL,Guyana,Georgetown,At Warehouse,2026-05-27,130,0,130,Unpaid,Call customer before pickup
+SST-2026-0006,CUST-005,Nadia Roberts,2026-05-23,Commercial Goods,2,West Palm Beach,FL,Guyana,Linden,At Warehouse,2026-06-02,510,510,0,Paid,
+SST-2026-0007,CUST-005,Nadia Roberts,2026-05-22,Barrel,3,West Palm Beach,FL,Guyana,Linden,Arrived at Destination,2026-06-08,410,75,335,Partial,Customer requested delivery confirmation
+SST-2026-0008,CUST-004,Andrew Thomas,2026-05-19,Package,1,Miramar,FL,Trinidad,Port of Spain,In Transit,2026-06-07,90,0,90,Unpaid,Call customer before pickup
+SST-2026-0009,CUST-008,Trevor James,2026-05-24,Barrel,2,Miami Gardens,FL,Jamaica,Kingston,Arrived at Destination,2026-06-02,265,0,265,Unpaid,Fragile items
+SST-2026-0010,CUST-002,Michael Singh,2026-05-19,Box,1,Fort Lauderdale,FL,Guyana,Berbice,Picked Up,2026-06-04,115,115,0,Paid,
+SST-2026-0011,CUST-008,Trevor James,2026-05-19,Box,3,Miami Gardens,FL,Jamaica,Kingston,Delivered,2026-06-04,245,245,0,Paid,Needs warehouse review
+SST-2026-0012,CUST-001,Janice Williams,2026-05-21,Package,1,Miami,FL,Guyana,Georgetown,Pickup Scheduled,2026-05-31,90,90,0,Paid,Fragile items
+SST-2026-0013,CUST-004,Andrew Thomas,2026-05-19,Commercial Goods,2,Miramar,FL,Trinidad,Port of Spain,At Warehouse,2026-06-08,525,0,525,Unpaid,Fragile items
+SST-2026-0014,CUST-008,Trevor James,2026-05-19,Box,1,Miami Gardens,FL,Jamaica,Kingston,Pickup Scheduled,2026-05-26,115,25,90,Partial,
+SST-2026-0015,CUST-002,Michael Singh,2026-05-22,Barrel,3,Fort Lauderdale,FL,Guyana,Berbice,Delivered,2026-06-04,360,0,360,Unpaid,Call customer before pickup
+SST-2026-0016,CUST-005,Nadia Roberts,2026-05-21,Package,1,West Palm Beach,FL,Guyana,Linden,Request Received,2026-06-06,90,0,90,Unpaid,
+SST-2026-0017,CUST-008,Trevor James,2026-05-24,Package,2,Miami Gardens,FL,Jamaica,Kingston,On Hold,2026-06-12,130,130,0,Paid,
+SST-2026-0018,CUST-006,Kevin Mohammed,2026-05-19,Package,2,Doral,FL,Barbados,Bridgetown,At Warehouse,2026-06-09,80,80,0,Paid,Customer requested delivery confirmation
+SST-2026-0019,CUST-007,Sandra Ali,2026-05-22,Barrel,1,Hollywood,FL,Guyana,Georgetown,Request Received,2026-06-12,130,75,55,Partial,Needs warehouse review
+SST-2026-0020,CUST-006,Kevin Mohammed,2026-05-24,Commercial Goods,2,Doral,FL,Barbados,Bridgetown,Arrived at Destination,2026-06-14,510,0,510,Unpaid,Fragile items
+SST-2026-0021,CUST-008,Trevor James,2026-05-19,Box,2,Miami Gardens,FL,Jamaica,Kingston,Picked Up,2026-06-08,140,140,0,Paid,Needs warehouse review
+SST-2026-0022,CUST-006,Kevin Mohammed,2026-05-18,Barrel,1,Doral,FL,Barbados,Bridgetown,Pickup Scheduled,2026-05-29,120,120,0,Paid,Customer requested delivery confirmation
+SST-2026-0023,CUST-007,Sandra Ali,2026-05-18,Box,1,Hollywood,FL,Guyana,Georgetown,At Warehouse,2026-06-04,80,25,55,Partial,Call customer before pickup
+SST-2026-0024,CUST-003,Patricia Persaud,2026-05-22,Package,2,Homestead,FL,Guyana,Essequibo,In Transit,2026-05-29,95,95,0,Paid,Call customer before pickup
+SST-2026-0025,CUST-005,Nadia Roberts,2026-05-22,Package,1,West Palm Beach,FL,Guyana,Linden,Out for Delivery,2026-06-10,50,40,10,Partial,Fragile items

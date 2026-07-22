@@ -1,0 +1,26 @@
+pickup_id,shipment_id,customer_id,customer_name,pickup_date,pickup_time_window,pickup_address,assigned_staff,pickup_status,notes
+PU-2026-0001,SST-2026-0001,CUST-002,Michael Singh,2026-05-19,9 AM - 12 PM,"1635 NW 56 St, Fort Lauderdale, FL",J. Clarke,Scheduled,Customer unavailable before noon
+PU-2026-0002,SST-2026-0002,CUST-004,Andrew Thomas,2026-05-24,12 PM - 3 PM,"3627 NW 196 St, Miramar, FL",M. Edwards,Completed,
+PU-2026-0003,SST-2026-0003,CUST-005,Nadia Roberts,2026-05-25,12 PM - 3 PM,"1239 NW 12 St, West Palm Beach, FL",J. Clarke,Completed,Call on arrival
+PU-2026-0004,SST-2026-0004,CUST-008,Trevor James,2026-05-25,12 PM - 3 PM,"2777 NW 119 St, Miami Gardens, FL",R. Baptiste,Completed,Call on arrival
+PU-2026-0005,SST-2026-0005,CUST-001,Janice Williams,2026-05-21,3 PM - 6 PM,"3583 NW 168 St, Miami, FL",R. Baptiste,Completed,Heavy barrel
+PU-2026-0006,SST-2026-0006,CUST-005,Nadia Roberts,2026-05-23,12 PM - 3 PM,"2721 NW 175 St, West Palm Beach, FL",R. Baptiste,Completed,Customer unavailable before noon
+PU-2026-0007,SST-2026-0007,CUST-005,Nadia Roberts,2026-05-23,12 PM - 3 PM,"7533 NW 1 St, West Palm Beach, FL",M. Edwards,Completed,Customer unavailable before noon
+PU-2026-0008,SST-2026-0008,CUST-004,Andrew Thomas,2026-05-20,6 PM - 8 PM,"419 NW 29 St, Miramar, FL",M. Edwards,Completed,Call on arrival
+PU-2026-0009,SST-2026-0009,CUST-008,Trevor James,2026-05-25,6 PM - 8 PM,"3570 NW 139 St, Miami Gardens, FL",J. Clarke,Completed,Call on arrival
+PU-2026-0010,SST-2026-0010,CUST-002,Michael Singh,2026-05-19,9 AM - 12 PM,"3850 NW 18 St, Fort Lauderdale, FL",A. Solomon,Completed,Call on arrival
+PU-2026-0011,SST-2026-0011,CUST-008,Trevor James,2026-05-19,9 AM - 12 PM,"1688 NW 169 St, Miami Gardens, FL",R. Baptiste,Completed,Call on arrival
+PU-2026-0012,SST-2026-0012,CUST-001,Janice Williams,2026-05-22,12 PM - 3 PM,"1335 NW 114 St, Miami, FL",A. Solomon,Pending,
+PU-2026-0013,SST-2026-0013,CUST-004,Andrew Thomas,2026-05-20,9 AM - 12 PM,"6496 NW 68 St, Miramar, FL",R. Baptiste,Completed,Call on arrival
+PU-2026-0014,SST-2026-0014,CUST-008,Trevor James,2026-05-19,6 PM - 8 PM,"8338 NW 136 St, Miami Gardens, FL",J. Clarke,Rescheduled,
+PU-2026-0015,SST-2026-0015,CUST-002,Michael Singh,2026-05-22,9 AM - 12 PM,"1443 NW 108 St, Fort Lauderdale, FL",M. Edwards,Completed,Call on arrival
+PU-2026-0016,SST-2026-0016,CUST-005,Nadia Roberts,2026-05-23,3 PM - 6 PM,"2270 NW 90 St, West Palm Beach, FL",A. Solomon,Scheduled,Gate code needed
+PU-2026-0017,SST-2026-0017,CUST-008,Trevor James,2026-05-24,9 AM - 12 PM,"1853 NW 191 St, Miami Gardens, FL",J. Clarke,Pending,Call on arrival
+PU-2026-0018,SST-2026-0018,CUST-006,Kevin Mohammed,2026-05-19,9 AM - 12 PM,"5564 NW 198 St, Doral, FL",J. Clarke,Completed,Call on arrival
+PU-2026-0019,SST-2026-0019,CUST-007,Sandra Ali,2026-05-22,3 PM - 6 PM,"6074 NW 11 St, Hollywood, FL",M. Edwards,Scheduled,Gate code needed
+PU-2026-0020,SST-2026-0020,CUST-006,Kevin Mohammed,2026-05-25,9 AM - 12 PM,"3038 NW 189 St, Doral, FL",M. Edwards,Completed,Heavy barrel
+PU-2026-0021,SST-2026-0021,CUST-008,Trevor James,2026-05-20,3 PM - 6 PM,"1237 NW 198 St, Miami Gardens, FL",M. Edwards,Completed,Call on arrival
+PU-2026-0022,SST-2026-0022,CUST-006,Kevin Mohammed,2026-05-20,6 PM - 8 PM,"8479 NW 30 St, Doral, FL",R. Baptiste,Pending,Customer unavailable before noon
+PU-2026-0023,SST-2026-0023,CUST-007,Sandra Ali,2026-05-19,6 PM - 8 PM,"5444 NW 104 St, Hollywood, FL",M. Edwards,Completed,Customer unavailable before noon
+PU-2026-0024,SST-2026-0024,CUST-003,Patricia Persaud,2026-05-24,3 PM - 6 PM,"7718 NW 114 St, Homestead, FL",R. Baptiste,Completed,Gate code needed
+PU-2026-0025,SST-2026-0025,CUST-005,Nadia Roberts,2026-05-22,9 AM - 12 PM,"4111 NW 122 St, West Palm Beach, FL",A. Solomon,Completed,Heavy barrel

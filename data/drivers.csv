@@ -1,0 +1,5 @@
+driver_id,driver_name,phone,home_base,service_areas,primary_area,max_pickups_per_day,vehicle_type,vehicle_plate,active_status,notes
+DRV-001,Kevin Brown,973-555-0141,"City of Orange, NJ",Queens; Brooklyn; Long Island,Queens,5,Cargo Van,NJ-KB1026,Active,Primary NYC route driver. Handles barrels and boxes.
+DRV-002,Dwayne Harris,973-555-0188,"City of Orange, NJ",Brooklyn; Bronx; Manhattan,Brooklyn,5,Box Truck,NJ-DH2045,Active,Handles heavier pickup routes and high-volume pickup days.
+DRV-003,Alicia Grant,973-555-0197,"City of Orange, NJ",Staten Island; New Jersey; Jersey City; Newark,New Jersey,6,Cargo Van,NJ-AG3321,Active,Covers New Jersey and Staten Island routes.
+DRV-004,Jason Clarke,973-555-0164,"City of Orange, NJ",Queens; Brooklyn; Bronx; New Jersey,Flexible,4,Sprinter Van,NJ-JC7782,Backup,Backup driver for overflow days or route delays.

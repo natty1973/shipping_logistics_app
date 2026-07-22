@@ -1,0 +1,104 @@
+status_id,shipment_id,status,status_date,updated_by,notes
+STAT-2026-0001-01,SST-2026-0001,Request Received,2026-05-18,admin@solomonshipping.com,Customer request entered into system
+STAT-2026-0001-02,SST-2026-0001,Pickup Scheduled,2026-05-19,warehouse@solomonshipping.com,Pickup date and time window assigned
+STAT-2026-0002-01,SST-2026-0002,Request Received,2026-05-23,operations@solomonshipping.com,Customer request entered into system
+STAT-2026-0002-02,SST-2026-0002,Pickup Scheduled,2026-05-24,admin@solomonshipping.com,Pickup date and time window assigned
+STAT-2026-0002-03,SST-2026-0002,Picked Up,2026-05-25,operations@solomonshipping.com,Shipment collected from customer
+STAT-2026-0002-04,SST-2026-0002,At Warehouse,2026-05-26,operations@solomonshipping.com,Shipment checked into warehouse
+STAT-2026-0003-01,SST-2026-0003,Request Received,2026-05-24,admin@solomonshipping.com,Customer request entered into system
+STAT-2026-0003-02,SST-2026-0003,Pickup Scheduled,2026-05-25,admin@solomonshipping.com,Pickup date and time window assigned
+STAT-2026-0003-03,SST-2026-0003,Picked Up,2026-05-26,operations@solomonshipping.com,Shipment collected from customer
+STAT-2026-0003-04,SST-2026-0003,At Warehouse,2026-05-27,operations@solomonshipping.com,Shipment checked into warehouse
+STAT-2026-0004-01,SST-2026-0004,Request Received,2026-05-23,admin@solomonshipping.com,Customer request entered into system
+STAT-2026-0004-02,SST-2026-0004,Pickup Scheduled,2026-05-24,warehouse@solomonshipping.com,Pickup date and time window assigned
+STAT-2026-0004-03,SST-2026-0004,Picked Up,2026-05-25,operations@solomonshipping.com,Shipment collected from customer
+STAT-2026-0005-01,SST-2026-0005,Request Received,2026-05-19,admin@solomonshipping.com,Customer request entered into system
+STAT-2026-0005-02,SST-2026-0005,Pickup Scheduled,2026-05-20,operations@solomonshipping.com,Pickup date and time window assigned
+STAT-2026-0005-03,SST-2026-0005,Picked Up,2026-05-21,admin@solomonshipping.com,Shipment collected from customer
+STAT-2026-0005-04,SST-2026-0005,At Warehouse,2026-05-22,admin@solomonshipping.com,Shipment checked into warehouse
+STAT-2026-0006-01,SST-2026-0006,Request Received,2026-05-23,operations@solomonshipping.com,Customer request entered into system
+STAT-2026-0006-02,SST-2026-0006,Pickup Scheduled,2026-05-24,operations@solomonshipping.com,Pickup date and time window assigned
+STAT-2026-0006-03,SST-2026-0006,Picked Up,2026-05-25,warehouse@solomonshipping.com,Shipment collected from customer
+STAT-2026-0006-04,SST-2026-0006,At Warehouse,2026-05-26,operations@solomonshipping.com,Shipment checked into warehouse
+STAT-2026-0007-01,SST-2026-0007,Request Received,2026-05-22,warehouse@solomonshipping.com,Customer request entered into system
+STAT-2026-0007-02,SST-2026-0007,Pickup Scheduled,2026-05-23,admin@solomonshipping.com,Pickup date and time window assigned
+STAT-2026-0007-03,SST-2026-0007,Picked Up,2026-05-24,warehouse@solomonshipping.com,Shipment collected from customer
+STAT-2026-0007-04,SST-2026-0007,At Warehouse,2026-05-25,operations@solomonshipping.com,Shipment checked into warehouse
+STAT-2026-0007-05,SST-2026-0007,In Transit,2026-05-26,warehouse@solomonshipping.com,Shipment departed origin facility
+STAT-2026-0007-06,SST-2026-0007,Arrived at Destination,2026-05-27,warehouse@solomonshipping.com,Shipment arrived at destination country
+STAT-2026-0008-01,SST-2026-0008,Request Received,2026-05-19,admin@solomonshipping.com,Customer request entered into system
+STAT-2026-0008-02,SST-2026-0008,Pickup Scheduled,2026-05-20,admin@solomonshipping.com,Pickup date and time window assigned
+STAT-2026-0008-03,SST-2026-0008,Picked Up,2026-05-21,warehouse@solomonshipping.com,Shipment collected from customer
+STAT-2026-0008-04,SST-2026-0008,At Warehouse,2026-05-22,admin@solomonshipping.com,Shipment checked into warehouse
+STAT-2026-0008-05,SST-2026-0008,In Transit,2026-05-23,admin@solomonshipping.com,Shipment departed origin facility
+STAT-2026-0009-01,SST-2026-0009,Request Received,2026-05-24,warehouse@solomonshipping.com,Customer request entered into system
+STAT-2026-0009-02,SST-2026-0009,Pickup Scheduled,2026-05-25,warehouse@solomonshipping.com,Pickup date and time window assigned
+STAT-2026-0009-03,SST-2026-0009,Picked Up,2026-05-26,operations@solomonshipping.com,Shipment collected from customer
+STAT-2026-0009-04,SST-2026-0009,At Warehouse,2026-05-27,operations@solomonshipping.com,Shipment checked into warehouse
+STAT-2026-0009-05,SST-2026-0009,In Transit,2026-05-28,warehouse@solomonshipping.com,Shipment departed origin facility
+STAT-2026-0009-06,SST-2026-0009,Arrived at Destination,2026-05-29,operations@solomonshipping.com,Shipment arrived at destination country
+STAT-2026-0010-01,SST-2026-0010,Request Received,2026-05-19,warehouse@solomonshipping.com,Customer request entered into system
+STAT-2026-0010-02,SST-2026-0010,Pickup Scheduled,2026-05-20,admin@solomonshipping.com,Pickup date and time window assigned
+STAT-2026-0010-03,SST-2026-0010,Picked Up,2026-05-21,operations@solomonshipping.com,Shipment collected from customer
+STAT-2026-0011-01,SST-2026-0011,Request Received,2026-05-19,operations@solomonshipping.com,Customer request entered into system
+STAT-2026-0011-02,SST-2026-0011,Pickup Scheduled,2026-05-20,operations@solomonshipping.com,Pickup date and time window assigned
+STAT-2026-0011-03,SST-2026-0011,Picked Up,2026-05-21,warehouse@solomonshipping.com,Shipment collected from customer
+STAT-2026-0011-04,SST-2026-0011,At Warehouse,2026-05-22,admin@solomonshipping.com,Shipment checked into warehouse
+STAT-2026-0011-05,SST-2026-0011,In Transit,2026-05-23,warehouse@solomonshipping.com,Shipment departed origin facility
+STAT-2026-0011-06,SST-2026-0011,Arrived at Destination,2026-05-24,warehouse@solomonshipping.com,Shipment arrived at destination country
+STAT-2026-0011-07,SST-2026-0011,Out for Delivery,2026-05-25,warehouse@solomonshipping.com,Shipment assigned for final delivery
+STAT-2026-0011-08,SST-2026-0011,Delivered,2026-05-26,admin@solomonshipping.com,Shipment delivered to recipient
+STAT-2026-0012-01,SST-2026-0012,Request Received,2026-05-21,admin@solomonshipping.com,Customer request entered into system
+STAT-2026-0012-02,SST-2026-0012,Pickup Scheduled,2026-05-22,admin@solomonshipping.com,Pickup date and time window assigned
+STAT-2026-0013-01,SST-2026-0013,Request Received,2026-05-19,warehouse@solomonshipping.com,Customer request entered into system
+STAT-2026-0013-02,SST-2026-0013,Pickup Scheduled,2026-05-20,warehouse@solomonshipping.com,Pickup date and time window assigned
+STAT-2026-0013-03,SST-2026-0013,Picked Up,2026-05-21,warehouse@solomonshipping.com,Shipment collected from customer
+STAT-2026-0013-04,SST-2026-0013,At Warehouse,2026-05-22,warehouse@solomonshipping.com,Shipment checked into warehouse
+STAT-2026-0014-01,SST-2026-0014,Request Received,2026-05-19,admin@solomonshipping.com,Customer request entered into system
+STAT-2026-0014-02,SST-2026-0014,Pickup Scheduled,2026-05-20,admin@solomonshipping.com,Pickup date and time window assigned
+STAT-2026-0015-01,SST-2026-0015,Request Received,2026-05-22,warehouse@solomonshipping.com,Customer request entered into system
+STAT-2026-0015-02,SST-2026-0015,Pickup Scheduled,2026-05-23,warehouse@solomonshipping.com,Pickup date and time window assigned
+STAT-2026-0015-03,SST-2026-0015,Picked Up,2026-05-24,operations@solomonshipping.com,Shipment collected from customer
+STAT-2026-0015-04,SST-2026-0015,At Warehouse,2026-05-25,admin@solomonshipping.com,Shipment checked into warehouse
+STAT-2026-0015-05,SST-2026-0015,In Transit,2026-05-26,operations@solomonshipping.com,Shipment departed origin facility
+STAT-2026-0015-06,SST-2026-0015,Arrived at Destination,2026-05-27,operations@solomonshipping.com,Shipment arrived at destination country
+STAT-2026-0015-07,SST-2026-0015,Out for Delivery,2026-05-28,admin@solomonshipping.com,Shipment assigned for final delivery
+STAT-2026-0015-08,SST-2026-0015,Delivered,2026-05-29,warehouse@solomonshipping.com,Shipment delivered to recipient
+STAT-2026-0016-01,SST-2026-0016,Request Received,2026-05-21,operations@solomonshipping.com,Customer request entered into system
+STAT-2026-0016-02,SST-2026-0016,Pickup Scheduled,2026-05-22,admin@solomonshipping.com,Pickup date and time window assigned
+STAT-2026-0017-01,SST-2026-0017,Request Received,2026-05-24,warehouse@solomonshipping.com,Customer request entered into system
+STAT-2026-0017-02,SST-2026-0017,Pickup Scheduled,2026-05-25,admin@solomonshipping.com,Pickup date and time window assigned
+STAT-2026-0017-03,SST-2026-0017,On Hold,2026-05-26,warehouse@solomonshipping.com,Shipment requires follow-up before processing
+STAT-2026-0018-01,SST-2026-0018,Request Received,2026-05-19,warehouse@solomonshipping.com,Customer request entered into system
+STAT-2026-0018-02,SST-2026-0018,Pickup Scheduled,2026-05-20,operations@solomonshipping.com,Pickup date and time window assigned
+STAT-2026-0018-03,SST-2026-0018,Picked Up,2026-05-21,warehouse@solomonshipping.com,Shipment collected from customer
+STAT-2026-0018-04,SST-2026-0018,At Warehouse,2026-05-22,warehouse@solomonshipping.com,Shipment checked into warehouse
+STAT-2026-0019-01,SST-2026-0019,Request Received,2026-05-22,warehouse@solomonshipping.com,Customer request entered into system
+STAT-2026-0019-02,SST-2026-0019,Pickup Scheduled,2026-05-23,admin@solomonshipping.com,Pickup date and time window assigned
+STAT-2026-0020-01,SST-2026-0020,Request Received,2026-05-24,operations@solomonshipping.com,Customer request entered into system
+STAT-2026-0020-02,SST-2026-0020,Pickup Scheduled,2026-05-25,admin@solomonshipping.com,Pickup date and time window assigned
+STAT-2026-0020-03,SST-2026-0020,Picked Up,2026-05-26,warehouse@solomonshipping.com,Shipment collected from customer
+STAT-2026-0020-04,SST-2026-0020,At Warehouse,2026-05-27,admin@solomonshipping.com,Shipment checked into warehouse
+STAT-2026-0020-05,SST-2026-0020,In Transit,2026-05-28,operations@solomonshipping.com,Shipment departed origin facility
+STAT-2026-0020-06,SST-2026-0020,Arrived at Destination,2026-05-29,admin@solomonshipping.com,Shipment arrived at destination country
+STAT-2026-0021-01,SST-2026-0021,Request Received,2026-05-19,operations@solomonshipping.com,Customer request entered into system
+STAT-2026-0021-02,SST-2026-0021,Pickup Scheduled,2026-05-20,warehouse@solomonshipping.com,Pickup date and time window assigned
+STAT-2026-0021-03,SST-2026-0021,Picked Up,2026-05-21,warehouse@solomonshipping.com,Shipment collected from customer
+STAT-2026-0022-01,SST-2026-0022,Request Received,2026-05-18,operations@solomonshipping.com,Customer request entered into system
+STAT-2026-0022-02,SST-2026-0022,Pickup Scheduled,2026-05-19,admin@solomonshipping.com,Pickup date and time window assigned
+STAT-2026-0023-01,SST-2026-0023,Request Received,2026-05-18,admin@solomonshipping.com,Customer request entered into system
+STAT-2026-0023-02,SST-2026-0023,Pickup Scheduled,2026-05-19,operations@solomonshipping.com,Pickup date and time window assigned
+STAT-2026-0023-03,SST-2026-0023,Picked Up,2026-05-20,warehouse@solomonshipping.com,Shipment collected from customer
+STAT-2026-0023-04,SST-2026-0023,At Warehouse,2026-05-21,operations@solomonshipping.com,Shipment checked into warehouse
+STAT-2026-0024-01,SST-2026-0024,Request Received,2026-05-22,operations@solomonshipping.com,Customer request entered into system
+STAT-2026-0024-02,SST-2026-0024,Pickup Scheduled,2026-05-23,warehouse@solomonshipping.com,Pickup date and time window assigned
+STAT-2026-0024-03,SST-2026-0024,Picked Up,2026-05-24,admin@solomonshipping.com,Shipment collected from customer
+STAT-2026-0024-04,SST-2026-0024,At Warehouse,2026-05-25,warehouse@solomonshipping.com,Shipment checked into warehouse
+STAT-2026-0024-05,SST-2026-0024,In Transit,2026-05-26,admin@solomonshipping.com,Shipment departed origin facility
+STAT-2026-0025-01,SST-2026-0025,Request Received,2026-05-22,warehouse@solomonshipping.com,Customer request entered into system
+STAT-2026-0025-02,SST-2026-0025,Pickup Scheduled,2026-05-23,warehouse@solomonshipping.com,Pickup date and time window assigned
+STAT-2026-0025-03,SST-2026-0025,Picked Up,2026-05-24,admin@solomonshipping.com,Shipment collected from customer
+STAT-2026-0025-04,SST-2026-0025,At Warehouse,2026-05-25,warehouse@solomonshipping.com,Shipment checked into warehouse
+STAT-2026-0025-05,SST-2026-0025,In Transit,2026-05-26,warehouse@solomonshipping.com,Shipment departed origin facility
+STAT-2026-0025-06,SST-2026-0025,Arrived at Destination,2026-05-27,operations@solomonshipping.com,Shipment arrived at destination country
+STAT-2026-0025-07,SST-2026-0025,Out for Delivery,2026-05-28,operations@solomonshipping.com,Shipment assigned for final delivery
