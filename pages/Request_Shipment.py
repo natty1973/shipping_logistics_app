@@ -74,23 +74,49 @@ PREFERRED_WINDOWS = [
 
 
 def get_database_url() -> str | None:
-    """Get the Neon URL from Streamlit Secrets or an environment variable."""
+    """
+    Read the Neon/PostgreSQL URL from supported Streamlit secret layouts.
 
-    environment_url = os.getenv("DATABASE_URL", "").strip()
-    if environment_url:
-        return environment_url
+    Supported layouts:
+
+    DATABASE_URL = "postgresql://..."
+
+    [connections.neon]
+    url = "postgresql://..."
+
+    [connections.postgresql]
+    url = "postgresql://..."
+    """
+
+    for environment_key in ("DATABASE_URL", "NEON_DATABASE_URL"):
+        environment_url = os.getenv(environment_key, "").strip()
+        if environment_url:
+            return environment_url
 
     try:
-        direct_url = str(st.secrets.get("DATABASE_URL", "")).strip()
-        if direct_url:
-            return direct_url
+        for top_level_key in ("DATABASE_URL", "NEON_DATABASE_URL"):
+            value = str(st.secrets.get(top_level_key, "")).strip()
+            if value:
+                return value
 
         connections = st.secrets.get("connections", {})
-        postgresql = connections.get("postgresql", {}) if connections else {}
-        nested_url = str(postgresql.get("url", "")).strip() if postgresql else ""
 
-        if nested_url:
-            return nested_url
+        if connections:
+            for connection_name in ("neon", "postgresql", "postgres"):
+                connection_settings = connections.get(connection_name, {})
+
+                if not connection_settings:
+                    continue
+
+                for url_key in (
+                    "url",
+                    "connection_string",
+                    "DATABASE_URL",
+                    "database_url",
+                ):
+                    value = str(connection_settings.get(url_key, "")).strip()
+                    if value:
+                        return value
 
     except (FileNotFoundError, KeyError, TypeError, AttributeError):
         return None
@@ -107,10 +133,10 @@ def open_database_connection() -> Any:
         )
 
     database_url = get_database_url()
-
     if not database_url:
         raise RuntimeError(
-            "DATABASE_URL is missing from Streamlit Secrets."
+            "The Neon connection URL was not found. Use either a top-level "
+            "DATABASE_URL secret or [connections.neon] with a url value."
         )
 
     return psycopg2.connect(
@@ -121,67 +147,34 @@ def open_database_connection() -> Any:
 
 
 def next_customer_id(cursor: Any) -> str:
-    """
-    Generate the next customer ID.
-
-    The advisory lock prevents two customers submitting at the same moment
-    from receiving the same ID.
-    """
-
     cursor.execute(
         "SELECT pg_advisory_xact_lock(hashtext(%s));",
         ("solomon_shipping.customer_id",),
     )
-
     cursor.execute(
         f"""
         SELECT COALESCE(
-            MAX(
-                (
-                    SUBSTRING(
-                        customer_id
-                        FROM '^CUST-([0-9]+)$'
-                    )
-                )::INTEGER
-            ),
+            MAX((SUBSTRING(customer_id FROM '^CUST-([0-9]+)$'))::INTEGER),
             0
         ) + 1
         FROM {DATABASE_SCHEMA}.customers
         WHERE customer_id ~ '^CUST-[0-9]+$';
         """
     )
-
-    next_number = int(cursor.fetchone()[0])
-
-    return f"CUST-{next_number:03d}"
+    return f"CUST-{int(cursor.fetchone()[0]):03d}"
 
 
 def next_shipment_id(cursor: Any, year: int) -> str:
-    """
-    Generate the next shipment ID.
-
-    Example:
-    SST-2026-0026
-    """
-
     pattern = rf"^SST-{year}-([0-9]+)$"
 
     cursor.execute(
         "SELECT pg_advisory_xact_lock(hashtext(%s));",
         (f"solomon_shipping.shipment_id.{year}",),
     )
-
     cursor.execute(
         f"""
         SELECT COALESCE(
-            MAX(
-                (
-                    SUBSTRING(
-                        shipment_id
-                        FROM %s
-                    )
-                )::INTEGER
-            ),
+            MAX((SUBSTRING(shipment_id FROM %s))::INTEGER),
             0
         ) + 1
         FROM {DATABASE_SCHEMA}.shipments
@@ -189,38 +182,20 @@ def next_shipment_id(cursor: Any, year: int) -> str:
         """,
         (pattern, pattern),
     )
-
-    next_number = int(cursor.fetchone()[0])
-
-    return f"SST-{year}-{next_number:04d}"
+    return f"SST-{year}-{int(cursor.fetchone()[0]):04d}"
 
 
 def next_pickup_id(cursor: Any, year: int) -> str:
-    """
-    Generate the next preferred-pickup request ID.
-
-    Example:
-    PU-2026-0026
-    """
-
     pattern = rf"^PU-{year}-([0-9]+)$"
 
     cursor.execute(
         "SELECT pg_advisory_xact_lock(hashtext(%s));",
         (f"solomon_shipping.pickup_id.{year}",),
     )
-
     cursor.execute(
         f"""
         SELECT COALESCE(
-            MAX(
-                (
-                    SUBSTRING(
-                        pickup_id
-                        FROM %s
-                    )
-                )::INTEGER
-            ),
+            MAX((SUBSTRING(pickup_id FROM %s))::INTEGER),
             0
         ) + 1
         FROM {DATABASE_SCHEMA}.pickup_schedule
@@ -228,10 +203,7 @@ def next_pickup_id(cursor: Any, year: int) -> str:
         """,
         (pattern, pattern),
     )
-
-    next_number = int(cursor.fetchone()[0])
-
-    return f"PU-{year}-{next_number:04d}"
+    return f"PU-{year}-{int(cursor.fetchone()[0]):04d}"
 
 
 def find_existing_customer_id(
@@ -240,18 +212,9 @@ def find_existing_customer_id(
     phone: str,
     email: str,
 ) -> str | None:
-    """
-    Find a returning customer.
+    """Find a returning customer by email or by matching name and phone."""
 
-    Email is checked first. If email is blank or does not match, the system
-    checks the combination of customer name and phone number.
-    """
-
-    clean_email = email.strip()
-    clean_name = customer_name.strip()
-    clean_phone = phone.strip()
-
-    if clean_email:
+    if email.strip():
         cursor.execute(
             f"""
             SELECT customer_id
@@ -259,11 +222,9 @@ def find_existing_customer_id(
             WHERE LOWER(BTRIM(email)) = LOWER(BTRIM(%s))
             LIMIT 1;
             """,
-            (clean_email,),
+            (email.strip(),),
         )
-
         row = cursor.fetchone()
-
         if row:
             return str(row[0])
 
@@ -272,38 +233,17 @@ def find_existing_customer_id(
         SELECT customer_id
         FROM {DATABASE_SCHEMA}.customers
         WHERE LOWER(BTRIM(customer_name)) = LOWER(BTRIM(%s))
-          AND REGEXP_REPLACE(
-                COALESCE(phone, ''),
-                '[^0-9]',
-                '',
-                'g'
-              )
-              =
-              REGEXP_REPLACE(
-                %s,
-                '[^0-9]',
-                '',
-                'g'
-              )
+          AND REGEXP_REPLACE(COALESCE(phone, ''), '[^0-9]', '', 'g')
+              = REGEXP_REPLACE(%s, '[^0-9]', '', 'g')
         LIMIT 1;
         """,
-        (
-            clean_name,
-            clean_phone,
-        ),
+        (customer_name.strip(), phone.strip()),
     )
-
     row = cursor.fetchone()
-
     return str(row[0]) if row else None
 
 
 def build_shipment_notes(data: dict[str, Any]) -> str:
-    """
-    Store intake information that does not currently have its own
-    dedicated shipment-table column.
-    """
-
     note_lines = [
         f"Recipient: {data['recipient_name']}",
         f"Recipient phone: {data['recipient_phone']}",
@@ -318,34 +258,17 @@ def build_shipment_notes(data: dict[str, Any]) -> str:
     ]
 
     if data["pickup_notes"]:
-        note_lines.append(
-            f"Pickup notes: {data['pickup_notes']}"
-        )
-
+        note_lines.append(f"Pickup notes: {data['pickup_notes']}")
     if data["shipment_notes"]:
-        note_lines.append(
-            f"Shipment notes: {data['shipment_notes']}"
-        )
-
+        note_lines.append(f"Shipment notes: {data['shipment_notes']}")
     if data["payment_notes"]:
-        note_lines.append(
-            f"Payment notes: {data['payment_notes']}"
-        )
+        note_lines.append(f"Payment notes: {data['payment_notes']}")
 
     return "\n".join(note_lines)
 
 
-def save_shipment_request(
-    data: dict[str, Any],
-) -> dict[str, Any]:
-    """
-    Save the shipment request to Neon.
-
-    The customer, shipment, pickup request, and first shipment status are
-    saved together in one database transaction.
-
-    If any database operation fails, the entire transaction is rolled back.
-    """
+def save_shipment_request(data: dict[str, Any]) -> dict[str, Any]:
+    """Save the request and return the permanent IDs generated by PostgreSQL."""
 
     connection = open_database_connection()
 
@@ -354,15 +277,14 @@ def save_shipment_request(
 
         with connection.cursor() as cursor:
             customer_id = find_existing_customer_id(
-                cursor=cursor,
-                customer_name=data["customer_name"],
-                phone=data["phone"],
-                email=data["email"],
+                cursor,
+                data["customer_name"],
+                data["phone"],
+                data["email"],
             )
 
             if customer_id is None:
                 customer_id = next_customer_id(cursor)
-
                 cursor.execute(
                     f"""
                     INSERT INTO {DATABASE_SCHEMA}.customers (
@@ -378,16 +300,8 @@ def save_shipment_request(
                         notes
                     )
                     VALUES (
-                        %s,
-                        %s,
-                        %s,
-                        NULLIF(%s, ''),
-                        %s,
-                        %s,
-                        %s,
-                        %s,
-                        %s,
-                        %s
+                        %s, %s, %s, NULLIF(%s, ''), %s,
+                        %s, %s, %s, %s, %s
                     );
                     """,
                     (
@@ -400,13 +314,9 @@ def save_shipment_request(
                         data["destination_country"],
                         data["destination_city"],
                         data["customer_type"],
-                        (
-                            "Preferred contact method: "
-                            f"{data['preferred_contact']}"
-                        ),
+                        f"Preferred contact: {data['preferred_contact']}",
                     ),
                 )
-
             else:
                 cursor.execute(
                     f"""
@@ -414,10 +324,7 @@ def save_shipment_request(
                     SET
                         customer_name = %s,
                         phone = %s,
-                        email = COALESCE(
-                            NULLIF(%s, ''),
-                            email
-                        ),
+                        email = COALESCE(NULLIF(%s, ''), email),
                         origin_city = %s,
                         origin_state = %s,
                         destination_country = %s,
@@ -435,33 +342,15 @@ def save_shipment_request(
                         data["destination_country"],
                         data["destination_city"],
                         data["customer_type"],
-                        (
-                            "Preferred contact method: "
-                            f"{data['preferred_contact']}"
-                        ),
+                        f"Preferred contact: {data['preferred_contact']}",
                         customer_id,
                     ),
                 )
 
             current_year = datetime.now().year
-
-            shipment_id = next_shipment_id(
-                cursor,
-                current_year,
-            )
-
-            pickup_id = next_pickup_id(
-                cursor,
-                current_year,
-            )
-
-            shipment_mode = (
-                "Air"
-                if "Air" in data["shipping_option"]
-                else "Sea"
-            )
-
-            shipment_notes = build_shipment_notes(data)
+            shipment_id = next_shipment_id(cursor, current_year)
+            pickup_id = next_pickup_id(cursor, current_year)
+            shipment_mode = "Air" if "Air" in data["shipping_option"] else "Sea"
 
             cursor.execute(
                 f"""
@@ -487,24 +376,8 @@ def save_shipment_request(
                     release_status
                 )
                 VALUES (
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    'Request Received',
-                    0,
-                    0,
-                    0,
-                    'Unpaid',
-                    %s,
-                    %s,
-                    %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    'Request Received', 0, 0, 0, 'Unpaid', %s, %s, %s,
                     'Pending Review'
                 );
                 """,
@@ -519,7 +392,7 @@ def save_shipment_request(
                     data["pickup_state"],
                     data["destination_country"],
                     data["destination_city"],
-                    shipment_notes,
+                    build_shipment_notes(data),
                     data["shipping_option"],
                     shipment_mode,
                 ),
@@ -539,10 +412,7 @@ def save_shipment_request(
             pickup_notes = "\n".join(
                 part
                 for part in [
-                    (
-                        "Preferred availability only; "
-                        "official two-hour window pending confirmation."
-                    ),
+                    "Preferred availability only; official two-hour window pending confirmation.",
                     f"Pickup area: {data['pickup_area']}",
                     f"Flexibility: {data['pickup_flexibility']}",
                     data["pickup_notes"],
@@ -565,16 +435,8 @@ def save_shipment_request(
                     notes
                 )
                 VALUES (
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    NULL,
-                    'Pending Confirmation',
-                    %s
+                    %s, %s, %s, %s, %s, %s, %s,
+                    NULL, 'Pending Confirmation', %s
                 );
                 """,
                 (
@@ -589,15 +451,8 @@ def save_shipment_request(
                 ),
             )
 
-            shipment_sequence = shipment_id.rsplit(
-                "-",
-                1,
-            )[-1]
-
-            status_id = (
-                f"STAT-{current_year}-"
-                f"{shipment_sequence}-01"
-            )
+            shipment_number = shipment_id.rsplit("-", 1)[-1]
+            status_id = f"STAT-{current_year}-{shipment_number}-01"
 
             cursor.execute(
                 f"""
@@ -610,22 +465,14 @@ def save_shipment_request(
                     notes
                 )
                 VALUES (
-                    %s,
-                    %s,
-                    'Request Received',
-                    CURRENT_TIMESTAMP,
-                    %s,
-                    %s
+                    %s, %s, 'Request Received', CURRENT_TIMESTAMP, %s, %s
                 );
                 """,
                 (
                     status_id,
                     shipment_id,
                     data["requested_by"],
-                    (
-                        "Shipment request submitted through "
-                        "the Request Shipment page."
-                    ),
+                    "Shipment request submitted through the Request Shipment page.",
                 ),
             )
 
@@ -635,9 +482,7 @@ def save_shipment_request(
             "shipment_id": shipment_id,
             "customer_id": customer_id,
             "pickup_id": pickup_id,
-            "request_date": datetime.now().strftime(
-                "%Y-%m-%d %H:%M:%S"
-            ),
+            "request_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "request_status": "Request Received",
             "pickup_status": "Pending Confirmation",
         }
@@ -645,100 +490,62 @@ def save_shipment_request(
     except Exception:
         connection.rollback()
         raise
-
     finally:
         connection.close()
 
 
 def get_portal_label() -> str:
-    portal_mode = st.session_state.get(
-        "portal_mode",
-        "customer",
-    )
+    portal_mode = st.session_state.get("portal_mode", "customer")
 
     if portal_mode == "staff":
         return "Staff Portal"
-
     if portal_mode == "owner":
         return "Owner Portal"
-
     return "Customer Portal"
 
 
 def get_page_subtitle() -> str:
-    portal_mode = st.session_state.get(
-        "portal_mode",
-        "customer",
-    )
+    portal_mode = st.session_state.get("portal_mode", "customer")
 
     if portal_mode == "staff":
         return (
-            "Create a shipment request on behalf of a customer. "
-            "A permanent shipment ID is generated when the request "
-            "is saved; the official pickup window is confirmed later."
+            "Create a shipment request on behalf of a customer. A permanent shipment ID is generated "
+            "when the request is saved; the official pickup window is confirmed later."
         )
-
     if portal_mode == "owner":
         return (
-            "Create or review shipment intake. Every saved request "
-            "receives a permanent shipment ID for tracking and "
-            "shipment management."
+            "Create or review shipment intake. Every saved request receives a permanent shipment ID "
+            "for tracking and shipment management."
         )
-
     return (
-        "Start a shipment request. After successful submission, "
-        "you will receive a permanent shipment ID to track and "
-        "manage your shipment."
+        "Start a shipment request. After successful submission, you will receive a permanent shipment ID "
+        "to track and manage your shipment."
     )
 
 
 def initialize_request_storage() -> None:
     if "shipment_request_records" not in st.session_state:
         st.session_state.shipment_request_records = []
-
     if "last_shipment_confirmation" not in st.session_state:
         st.session_state.last_shipment_confirmation = None
 
 
-def display_confirmation(
-    record: dict[str, Any],
-) -> None:
-    st.success(
-        "Your shipment request was saved successfully."
-    )
-
+def display_confirmation(record: dict[str, Any]) -> None:
+    st.success("Your shipment request was saved successfully.")
     st.markdown("### Your Shipment ID")
-
-    st.code(
-        record["shipment_id"],
-        language=None,
-    )
-
+    st.code(record["shipment_id"], language=None)
     st.warning(
-        "Save this Shipment ID. You will need it to track the "
-        "package or manage this shipment. Your pickup is still "
-        "pending confirmation."
+        "Save this Shipment ID. You will need it to track the package or manage this shipment. "
+        "Your pickup is still pending confirmation."
     )
 
-    status_col, pickup_col, customer_col = st.columns(3)
-
-    with status_col:
-        st.metric(
-            "Shipment Status",
-            record["request_status"],
-        )
-
-    with pickup_col:
-        st.metric(
-            "Pickup Status",
-            record["pickup_status"],
-        )
-
-    with customer_col:
-        st.metric(
-            "Customer ID",
-            record["customer_id"],
-        )
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Shipment Status", record["request_status"])
+    with col2:
+        st.metric("Pickup Status", record["pickup_status"])
+    with col3:
+        st.metric("Customer ID", record["customer_id"])
 
 
 def main() -> None:
@@ -765,116 +572,62 @@ def main() -> None:
     st.write("")
 
     st.info(
-        "A permanent Shipment ID is generated after the request "
-        "is successfully saved. Pickup times entered here are "
-        "preferred availability only."
+        "A permanent Shipment ID is generated after the request is successfully saved. "
+        "Pickup times entered here are preferred availability only."
     )
 
     st.subheader("Shipment Request Form")
 
-    with st.form(
-        "shipment_request_form",
-        clear_on_submit=False,
-    ):
+    with st.form("shipment_request_form", clear_on_submit=False):
         st.markdown("### Customer Information")
-
         customer_col1, customer_col2 = st.columns(2)
 
         with customer_col1:
-            customer_name = st.text_input(
-                "Full Name *"
-            )
-
-            phone = st.text_input(
-                "Phone Number *"
-            )
-
-            email = st.text_input(
-                "Email Address"
-            )
+            customer_name = st.text_input("Full Name *")
+            phone = st.text_input("Phone Number *")
+            email = st.text_input("Email Address")
 
         with customer_col2:
             customer_type = st.selectbox(
                 "Customer Type",
-                [
-                    "New Customer",
-                    "Returning Customer",
-                ],
+                ["New Customer", "Returning Customer"],
             )
-
             preferred_contact = st.selectbox(
                 "Preferred Contact Method",
-                [
-                    "Phone",
-                    "Email",
-                    "WhatsApp",
-                    "Text Message",
-                ],
+                ["Phone", "Email", "WhatsApp", "Text Message"],
             )
-
             requested_by = st.text_input(
                 "Request Entered By",
-                value=(
-                    "Customer"
-                    if portal_label == "Customer Portal"
-                    else portal_label
-                ),
+                value="Customer" if portal_label == "Customer Portal" else portal_label,
             )
 
         st.divider()
-
-        st.markdown(
-            "### Preferred Pickup Information"
-        )
-
+        st.markdown("### Preferred Pickup Information")
         st.caption(
-            "This is not the final confirmed pickup schedule. "
-            "Staff will confirm the official two-hour window after "
-            "reviewing driver availability and route capacity."
+            "This is not the final confirmed pickup schedule. Staff will confirm the official two-hour window after reviewing driver availability and route capacity."
         )
 
         pickup_col1, pickup_col2 = st.columns(2)
 
         with pickup_col1:
-            pickup_address = st.text_input(
-                "Pickup Address *"
-            )
-
-            pickup_city = st.text_input(
-                "Pickup City *"
-            )
-
-            pickup_state = st.text_input(
-                "Pickup State *",
-                value="NJ",
-            )
-
-            pickup_zip = st.text_input(
-                "Pickup ZIP Code"
-            )
+            pickup_address = st.text_input("Pickup Address *")
+            pickup_city = st.text_input("Pickup City *")
+            pickup_state = st.text_input("Pickup State *", value="NJ")
+            pickup_zip = st.text_input("Pickup ZIP Code")
 
         with pickup_col2:
-            pickup_area = st.selectbox(
-                "Pickup Area / Route",
-                PICKUP_AREAS,
-            )
-
+            pickup_area = st.selectbox("Pickup Area / Route", PICKUP_AREAS)
             preferred_pickup_date = st.date_input(
                 "Preferred Pickup Date",
                 value=date.today(),
                 min_value=date.today(),
             )
-
             preferred_pickup_window = st.selectbox(
                 "Preferred Pickup Window",
                 PREFERRED_WINDOWS,
             )
-
             pickup_flexibility = st.selectbox(
-                (
-                    "If this time is unavailable, "
-                    "can we offer another window?"
-                ),
+                "If this time is unavailable, can we offer another window?",
                 [
                     "Yes, any available time that day",
                     "Yes, but contact me first",
@@ -884,62 +637,37 @@ def main() -> None:
 
         pickup_notes = st.text_area(
             "Pickup Notes",
-            placeholder=(
-                "Add gate code, apartment number, parking "
-                "instructions, best contact person, or "
-                "preferred pickup notes."
-            ),
+            placeholder="Add gate code, apartment number, parking instructions, best contact person, or preferred pickup notes.",
             height=100,
         )
 
         st.divider()
-
-        st.markdown(
-            "### Destination Information"
-        )
-
-        destination_col1, destination_col2 = (
-            st.columns(2)
-        )
+        st.markdown("### Destination Information")
+        destination_col1, destination_col2 = st.columns(2)
 
         with destination_col1:
             destination_country = st.selectbox(
                 "Destination Country *",
                 DESTINATION_COUNTRIES,
             )
-
-            destination_city = st.text_input(
-                "Destination City / Area *"
-            )
+            destination_city = st.text_input("Destination City / Area *")
 
         with destination_col2:
-            recipient_name = st.text_input(
-                "Recipient Name *"
-            )
-
-            recipient_phone = st.text_input(
-                "Recipient Phone Number *"
-            )
+            recipient_name = st.text_input("Recipient Name *")
+            recipient_phone = st.text_input("Recipient Phone Number *")
 
         st.divider()
-
         st.markdown("### Shipment Details")
-
         shipment_col1, shipment_col2 = st.columns(2)
 
         with shipment_col1:
-            item_type = st.selectbox(
-                "Item Type",
-                ITEM_TYPES,
-            )
-
+            item_type = st.selectbox("Item Type", ITEM_TYPES)
             quantity = st.number_input(
                 "Quantity",
                 min_value=1,
                 step=1,
                 value=1,
             )
-
             estimated_weight = st.text_input(
                 "Estimated Weight, if known",
                 placeholder="Example: 50 lbs",
@@ -950,12 +678,10 @@ def main() -> None:
                 "Preferred Shipping Option",
                 SHIPPING_OPTIONS,
             )
-
             declared_value = st.text_input(
                 "Declared Value, if applicable",
                 placeholder="Example: $250",
             )
-
             special_handling = st.multiselect(
                 "Special Handling",
                 [
@@ -971,15 +697,11 @@ def main() -> None:
 
         shipment_notes = st.text_area(
             "Additional Shipment Notes",
-            placeholder=(
-                "Add item details, delivery notes, "
-                "or special requests."
-            ),
+            placeholder="Add item details, delivery notes, or special requests.",
             height=120,
         )
 
         st.divider()
-
         st.markdown("### Payment Preference")
 
         payment_terms = st.selectbox(
@@ -994,10 +716,7 @@ def main() -> None:
 
         payment_notes = st.text_area(
             "Payment Notes",
-            placeholder=(
-                "Example: Sender pays deposit in New Jersey, "
-                "receiver pays balance in Guyana."
-            ),
+            placeholder="Example: Sender pays deposit in New Jersey, receiver pays balance in Guyana.",
             height=80,
         )
 
@@ -1030,14 +749,10 @@ def main() -> None:
                 + ", ".join(missing_fields)
                 + "."
             )
-
         else:
             form_data = {
                 "entered_from_portal": portal_label,
-                "requested_by": (
-                    requested_by.strip()
-                    or portal_label
-                ),
+                "requested_by": requested_by.strip() or portal_label,
                 "customer_name": customer_name.strip(),
                 "phone": phone.strip(),
                 "email": email.strip(),
@@ -1048,175 +763,95 @@ def main() -> None:
                 "pickup_state": pickup_state.strip(),
                 "pickup_zip": pickup_zip.strip(),
                 "pickup_area": pickup_area,
-                "preferred_pickup_date": (
-                    preferred_pickup_date
-                ),
-                "preferred_pickup_window": (
-                    preferred_pickup_window
-                ),
-                "pickup_flexibility": (
-                    pickup_flexibility
-                ),
+                "preferred_pickup_date": preferred_pickup_date,
+                "preferred_pickup_window": preferred_pickup_window,
+                "pickup_flexibility": pickup_flexibility,
                 "pickup_notes": pickup_notes.strip(),
-                "destination_country": (
-                    destination_country
-                ),
-                "destination_city": (
-                    destination_city.strip()
-                ),
-                "recipient_name": (
-                    recipient_name.strip()
-                ),
-                "recipient_phone": (
-                    recipient_phone.strip()
-                ),
+                "destination_country": destination_country,
+                "destination_city": destination_city.strip(),
+                "recipient_name": recipient_name.strip(),
+                "recipient_phone": recipient_phone.strip(),
                 "item_type": item_type,
                 "quantity": int(quantity),
-                "estimated_weight": (
-                    estimated_weight.strip()
-                ),
+                "estimated_weight": estimated_weight.strip(),
                 "shipping_option": shipping_option,
                 "declared_value": declared_value.strip(),
-                "special_handling": ", ".join(
-                    special_handling
-                ),
-                "shipment_notes": (
-                    shipment_notes.strip()
-                ),
+                "special_handling": ", ".join(special_handling),
+                "shipment_notes": shipment_notes.strip(),
                 "payment_terms": payment_terms,
-                "payment_notes": (
-                    payment_notes.strip()
-                ),
+                "payment_notes": payment_notes.strip(),
             }
 
             try:
                 with st.spinner(
-                    "Saving the shipment request and "
-                    "generating the Shipment ID..."
+                    "Saving the shipment request and generating the Shipment ID..."
                 ):
-                    database_result = (
-                        save_shipment_request(form_data)
-                    )
+                    database_result = save_shipment_request(form_data)
 
                 request_record = {
                     **database_result,
                     **form_data,
                 }
 
-                st.session_state.shipment_request_records.append(
-                    request_record
-                )
-
-                st.session_state.last_shipment_confirmation = (
-                    request_record
-                )
+                st.session_state.shipment_request_records.append(request_record)
+                st.session_state.last_shipment_confirmation = request_record
 
                 display_confirmation(request_record)
 
                 st.markdown("### Request Summary")
+                request_df = pd.DataFrame([request_record])
+                st.dataframe(request_df, use_container_width=True)
 
-                request_df = pd.DataFrame(
-                    [request_record]
-                )
-
-                st.dataframe(
-                    request_df,
-                    use_container_width=True,
-                )
-
-                csv_data = (
-                    request_df
-                    .to_csv(index=False)
-                    .encode("utf-8")
-                )
-
+                csv_data = request_df.to_csv(index=False).encode("utf-8")
                 st.download_button(
                     label="Download Shipment Confirmation",
                     data=csv_data,
-                    file_name=(
-                        f"{request_record['shipment_id']}"
-                        "_shipment_confirmation.csv"
-                    ),
+                    file_name=f"{request_record['shipment_id']}_shipment_confirmation.csv",
                     mime="text/csv",
                 )
 
             except Exception as exc:
-                st.session_state.last_shipment_confirmation = (
-                    None
-                )
-
+                st.session_state.last_shipment_confirmation = None
                 st.error(
-                    "The shipment request could not be saved "
-                    "to Neon, so no Shipment ID was issued. "
-                    "Confirm that DATABASE_URL is saved in "
-                    "Streamlit Secrets and that the "
-                    "solomon_shipping tables were installed "
-                    "successfully."
+                    "The shipment request could not be saved to Neon, so no Shipment ID was issued. "
+                    "Confirm that DATABASE_URL is saved in Streamlit Secrets and that the "
+                    "solomon_shipping tables were installed successfully."
                 )
-
-                st.caption(
-                    f"Technical details: {exc}"
-                )
+                st.caption(f"Technical details: {exc}")
 
     elif st.session_state.last_shipment_confirmation:
-        with st.expander(
-            "View the most recent shipment confirmation"
-        ):
-            display_confirmation(
-                st.session_state.last_shipment_confirmation
-            )
+        with st.expander("View the most recent shipment confirmation"):
+            display_confirmation(st.session_state.last_shipment_confirmation)
 
     st.divider()
-
-    st.subheader(
-        "How the Pickup Confirmation Process Works"
-    )
-
-    process_col1, process_col2, process_col3 = (
-        st.columns(3)
-    )
+    st.subheader("How the Pickup Confirmation Process Works")
+    process_col1, process_col2, process_col3 = st.columns(3)
 
     with process_col1:
         with st.container(border=True):
             st.markdown("### 1. Submit Request")
-
             st.write(
-                "The customer submits the request and "
-                "immediately receives a permanent Shipment ID."
+                "The customer submits the request and immediately receives a permanent Shipment ID."
             )
 
     with process_col2:
         with st.container(border=True):
             st.markdown("### 2. Staff Reviews")
-
             st.write(
-                "Staff checks route capacity, driver "
-                "availability, pickup area, and shipment details."
+                "Staff checks route capacity, driver availability, pickup area, and shipment details."
             )
 
     with process_col3:
         with st.container(border=True):
-            st.markdown(
-                "### 3. Pickup Window Confirmed"
-            )
-
+            st.markdown("### 3. Pickup Window Confirmed")
             st.write(
-                "Solomon Shipping confirms the official "
-                "pickup window and updates the same Shipment ID."
+                "Solomon Shipping confirms the official pickup window and updates the same Shipment ID."
             )
 
     if st.session_state.shipment_request_records:
-        with st.expander(
-            "View submitted requests from this session"
-        ):
-            session_df = pd.DataFrame(
-                st.session_state.shipment_request_records
-            )
-
-            st.dataframe(
-                session_df,
-                use_container_width=True,
-            )
+        with st.expander("View submitted requests from this session"):
+            session_df = pd.DataFrame(st.session_state.shipment_request_records)
+            st.dataframe(session_df, use_container_width=True)
 
 
 if __name__ == "__main__":
