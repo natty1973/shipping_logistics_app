@@ -10,3 +10,4 @@ streamlit>=1.28
 pandas
 SQLAlchemy>=2.0.0
 psycopg2-binary>=2.9.6
+reportlab>=4.0

@@ -3,12 +3,26 @@ from __future__ import annotations
 import os
 import re
 from datetime import date, datetime
+from html import escape
+from io import BytesIO
 from typing import Any
 
 import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine, URL
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.platypus import (
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
 
 from src.styles import apply_custom_styles, hero, sidebar_shipping_options
 
@@ -940,6 +954,1027 @@ def save_shipment_request(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+
+def _confirmation_value(
+    value: Any,
+    default: str = "Not provided",
+) -> str:
+    """Convert nullable values into clean confirmation text."""
+
+    if value is None:
+        return default
+
+    try:
+        if pd.isna(value):
+            return default
+    except (TypeError, ValueError):
+        pass
+
+    if isinstance(value, datetime):
+        return value.strftime("%B %d, %Y at %I:%M %p")
+
+    if isinstance(value, date):
+        return value.strftime("%B %d, %Y")
+
+    clean_value = str(value).strip()
+
+    return clean_value or default
+
+
+def _pdf_safe_text(value: Any) -> str:
+    """Prepare text for ReportLab's built-in fonts and Paragraph markup."""
+
+    clean_value = _confirmation_value(value)
+
+    replacements = {
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u2022": "-",
+    }
+
+    for original, replacement in replacements.items():
+        clean_value = clean_value.replace(original, replacement)
+
+    return escape(clean_value).replace("\n", "<br/>")
+
+
+def _pdf_paragraph(
+    value: Any,
+    style: ParagraphStyle,
+) -> Paragraph:
+    return Paragraph(
+        _pdf_safe_text(value),
+        style,
+    )
+
+
+def _pdf_section_table(
+    title: str,
+    rows: list[tuple[str, Any]],
+    label_style: ParagraphStyle,
+    value_style: ParagraphStyle,
+    section_style: ParagraphStyle,
+) -> list[Any]:
+    """Build a branded two-column section for the confirmation PDF."""
+
+    section_rows: list[list[Any]] = [
+        [
+            Paragraph(
+                _pdf_safe_text(title),
+                section_style,
+            ),
+            "",
+        ]
+    ]
+
+    for label, value in rows:
+        section_rows.append(
+            [
+                _pdf_paragraph(label, label_style),
+                _pdf_paragraph(value, value_style),
+            ]
+        )
+
+    table = Table(
+        section_rows,
+        colWidths=[1.75 * inch, 5.05 * inch],
+        repeatRows=1,
+        hAlign="LEFT",
+    )
+
+    table.setStyle(
+        TableStyle(
+            [
+                (
+                    "SPAN",
+                    (0, 0),
+                    (1, 0),
+                ),
+                (
+                    "BACKGROUND",
+                    (0, 0),
+                    (1, 0),
+                    colors.HexColor("#0B6E4F"),
+                ),
+                (
+                    "TEXTCOLOR",
+                    (0, 0),
+                    (1, 0),
+                    colors.white,
+                ),
+                (
+                    "BACKGROUND",
+                    (0, 1),
+                    (0, -1),
+                    colors.HexColor("#F1F7F4"),
+                ),
+                (
+                    "GRID",
+                    (0, 0),
+                    (-1, -1),
+                    0.5,
+                    colors.HexColor("#D6E4DE"),
+                ),
+                (
+                    "VALIGN",
+                    (0, 0),
+                    (-1, -1),
+                    "TOP",
+                ),
+                (
+                    "LEFTPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    8,
+                ),
+                (
+                    "RIGHTPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    8,
+                ),
+                (
+                    "TOPPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    7,
+                ),
+                (
+                    "BOTTOMPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    7,
+                ),
+            ]
+        )
+    )
+
+    return [
+        table,
+        Spacer(1, 0.14 * inch),
+    ]
+
+
+def _draw_confirmation_footer(
+    canvas: Any,
+    document: Any,
+) -> None:
+    """Draw a consistent footer on every PDF page."""
+
+    canvas.saveState()
+    page_width, _ = letter
+
+    canvas.setStrokeColor(
+        colors.HexColor("#D6E4DE")
+    )
+    canvas.line(
+        0.55 * inch,
+        0.48 * inch,
+        page_width - 0.55 * inch,
+        0.48 * inch,
+    )
+
+    canvas.setFont(
+        "Helvetica",
+        8,
+    )
+    canvas.setFillColor(
+        colors.HexColor("#4B5563")
+    )
+    canvas.drawString(
+        0.55 * inch,
+        0.29 * inch,
+        "Solomon Shipping and Trading Inc. | 973-675-4921",
+    )
+    canvas.drawRightString(
+        page_width - 0.55 * inch,
+        0.29 * inch,
+        f"Page {document.page}",
+    )
+
+    canvas.setFont(
+        "Helvetica-Oblique",
+        7,
+    )
+    canvas.setFillColor(
+        colors.HexColor("#0B6E4F")
+    )
+    canvas.drawRightString(
+        page_width - 0.55 * inch,
+        0.16 * inch,
+        "Developed by Niota Labs LLC",
+    )
+
+    canvas.restoreState()
+
+
+def build_shipment_confirmation_pdf(
+    record: dict[str, Any],
+) -> bytes:
+    """Create a polished Shipment Request Confirmation PDF in memory."""
+
+    buffer = BytesIO()
+
+    document = SimpleDocTemplate(
+        buffer,
+        pagesize=letter,
+        rightMargin=0.55 * inch,
+        leftMargin=0.55 * inch,
+        topMargin=0.5 * inch,
+        bottomMargin=0.65 * inch,
+        title=(
+            "Shipment Request Confirmation - "
+            f"{record.get('shipment_id', '')}"
+        ),
+        author="Solomon Shipping and Trading Inc.",
+        subject="Shipment Request Confirmation",
+    )
+
+    styles = getSampleStyleSheet()
+
+    company_style = ParagraphStyle(
+        "ConfirmationCompany",
+        parent=styles["Heading1"],
+        fontName="Helvetica-Bold",
+        fontSize=16,
+        leading=19,
+        textColor=colors.HexColor("#0B6E4F"),
+        alignment=TA_LEFT,
+        spaceAfter=2,
+    )
+
+    contact_style = ParagraphStyle(
+        "ConfirmationContact",
+        parent=styles["BodyText"],
+        fontName="Helvetica",
+        fontSize=8.5,
+        leading=11,
+        textColor=colors.HexColor("#4B5563"),
+    )
+
+    title_style = ParagraphStyle(
+        "ConfirmationTitle",
+        parent=styles["Heading1"],
+        fontName="Helvetica-Bold",
+        fontSize=14,
+        leading=17,
+        textColor=colors.HexColor("#111827"),
+        alignment=TA_CENTER,
+    )
+
+    shipment_id_style = ParagraphStyle(
+        "ConfirmationShipmentId",
+        parent=styles["Heading2"],
+        fontName="Helvetica-Bold",
+        fontSize=18,
+        leading=22,
+        textColor=colors.HexColor("#B42318"),
+        alignment=TA_CENTER,
+    )
+
+    notice_style = ParagraphStyle(
+        "ConfirmationNotice",
+        parent=styles["BodyText"],
+        fontName="Helvetica-Bold",
+        fontSize=9,
+        leading=12,
+        textColor=colors.HexColor("#5B4300"),
+        alignment=TA_LEFT,
+    )
+
+    section_style = ParagraphStyle(
+        "ConfirmationSection",
+        parent=styles["Heading3"],
+        fontName="Helvetica-Bold",
+        fontSize=10,
+        leading=12,
+        textColor=colors.white,
+    )
+
+    label_style = ParagraphStyle(
+        "ConfirmationLabel",
+        parent=styles["BodyText"],
+        fontName="Helvetica-Bold",
+        fontSize=8.5,
+        leading=11,
+        textColor=colors.HexColor("#1F2937"),
+    )
+
+    value_style = ParagraphStyle(
+        "ConfirmationValue",
+        parent=styles["BodyText"],
+        fontName="Helvetica",
+        fontSize=8.5,
+        leading=11,
+        textColor=colors.HexColor("#111827"),
+    )
+
+    small_style = ParagraphStyle(
+        "ConfirmationSmall",
+        parent=styles["BodyText"],
+        fontName="Helvetica",
+        fontSize=8,
+        leading=10,
+        textColor=colors.HexColor("#4B5563"),
+    )
+
+    story: list[Any] = []
+
+    header_table = Table(
+        [
+            [
+                Paragraph(
+                    "Solomon Shipping and Trading Inc.",
+                    company_style,
+                ),
+                Paragraph(
+                    "SHIPMENT REQUEST<br/>CONFIRMATION",
+                    title_style,
+                ),
+            ],
+            [
+                Paragraph(
+                    (
+                        "200 Main St Rear<br/>"
+                        "City of Orange, NJ 07050<br/>"
+                        "Phone: 973-675-4921"
+                    ),
+                    contact_style,
+                ),
+                Paragraph(
+                    _pdf_safe_text(
+                        record.get("shipment_id")
+                    ),
+                    shipment_id_style,
+                ),
+            ],
+        ],
+        colWidths=[3.85 * inch, 2.95 * inch],
+        hAlign="LEFT",
+    )
+
+    header_table.setStyle(
+        TableStyle(
+            [
+                (
+                    "VALIGN",
+                    (0, 0),
+                    (-1, -1),
+                    "MIDDLE",
+                ),
+                (
+                    "BOX",
+                    (0, 0),
+                    (-1, -1),
+                    1,
+                    colors.HexColor("#0B6E4F"),
+                ),
+                (
+                    "LINEBELOW",
+                    (0, 0),
+                    (-1, 0),
+                    0.5,
+                    colors.HexColor("#D6E4DE"),
+                ),
+                (
+                    "BACKGROUND",
+                    (1, 0),
+                    (1, -1),
+                    colors.HexColor("#FFF7D6"),
+                ),
+                (
+                    "LEFTPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    10,
+                ),
+                (
+                    "RIGHTPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    10,
+                ),
+                (
+                    "TOPPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    8,
+                ),
+                (
+                    "BOTTOMPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    8,
+                ),
+            ]
+        )
+    )
+
+    story.append(header_table)
+    story.append(Spacer(1, 0.14 * inch))
+
+    notice_table = Table(
+        [
+            [
+                Paragraph(
+                    (
+                        "This document confirms that Solomon Shipping received "
+                        "the shipment request. It is not a final invoice and it "
+                        "does not confirm the official pickup window. Staff will "
+                        "review the request and contact the customer with pricing "
+                        "and pickup confirmation."
+                    ),
+                    notice_style,
+                )
+            ]
+        ],
+        colWidths=[6.8 * inch],
+    )
+
+    notice_table.setStyle(
+        TableStyle(
+            [
+                (
+                    "BACKGROUND",
+                    (0, 0),
+                    (-1, -1),
+                    colors.HexColor("#FFF4C2"),
+                ),
+                (
+                    "BOX",
+                    (0, 0),
+                    (-1, -1),
+                    0.75,
+                    colors.HexColor("#E0B400"),
+                ),
+                (
+                    "LEFTPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    10,
+                ),
+                (
+                    "RIGHTPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    10,
+                ),
+                (
+                    "TOPPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    8,
+                ),
+                (
+                    "BOTTOMPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    8,
+                ),
+            ]
+        )
+    )
+
+    story.append(notice_table)
+    story.append(Spacer(1, 0.14 * inch))
+
+    key_information = [
+        [
+            _pdf_paragraph(
+                "Request Date",
+                label_style,
+            ),
+            _pdf_paragraph(
+                record.get("request_date"),
+                value_style,
+            ),
+            _pdf_paragraph(
+                "Shipment Status",
+                label_style,
+            ),
+            _pdf_paragraph(
+                record.get("request_status"),
+                value_style,
+            ),
+        ],
+        [
+            _pdf_paragraph(
+                "Customer ID",
+                label_style,
+            ),
+            _pdf_paragraph(
+                record.get("customer_id"),
+                value_style,
+            ),
+            _pdf_paragraph(
+                "Pickup Status",
+                label_style,
+            ),
+            _pdf_paragraph(
+                record.get("pickup_status"),
+                value_style,
+            ),
+        ],
+        [
+            _pdf_paragraph(
+                "Pickup Request ID",
+                label_style,
+            ),
+            _pdf_paragraph(
+                record.get("pickup_id"),
+                value_style,
+            ),
+            _pdf_paragraph(
+                "Entered From",
+                label_style,
+            ),
+            _pdf_paragraph(
+                record.get("entered_from_portal"),
+                value_style,
+            ),
+        ],
+    ]
+
+    key_table = Table(
+        key_information,
+        colWidths=[1.25 * inch, 2.15 * inch, 1.25 * inch, 2.15 * inch],
+    )
+
+    key_table.setStyle(
+        TableStyle(
+            [
+                (
+                    "BACKGROUND",
+                    (0, 0),
+                    (0, -1),
+                    colors.HexColor("#F1F7F4"),
+                ),
+                (
+                    "BACKGROUND",
+                    (2, 0),
+                    (2, -1),
+                    colors.HexColor("#F1F7F4"),
+                ),
+                (
+                    "GRID",
+                    (0, 0),
+                    (-1, -1),
+                    0.5,
+                    colors.HexColor("#D6E4DE"),
+                ),
+                (
+                    "VALIGN",
+                    (0, 0),
+                    (-1, -1),
+                    "TOP",
+                ),
+                (
+                    "LEFTPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    7,
+                ),
+                (
+                    "RIGHTPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    7,
+                ),
+                (
+                    "TOPPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    6,
+                ),
+                (
+                    "BOTTOMPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    6,
+                ),
+            ]
+        )
+    )
+
+    story.append(key_table)
+    story.append(Spacer(1, 0.14 * inch))
+
+    pickup_full_address = record.get("pickup_full_address")
+
+    if not _confirmation_value(
+        pickup_full_address,
+        "",
+    ):
+        pickup_full_address = ", ".join(
+            part
+            for part in [
+                _confirmation_value(
+                    record.get("pickup_address"),
+                    "",
+                ),
+                _confirmation_value(
+                    record.get("pickup_city"),
+                    "",
+                ),
+                _confirmation_value(
+                    record.get("pickup_state"),
+                    "",
+                ),
+                _confirmation_value(
+                    record.get("pickup_zip"),
+                    "",
+                ),
+            ]
+            if part
+        )
+
+    sections = [
+        (
+            "Customer Information",
+            [
+                (
+                    "Customer Name",
+                    record.get("customer_name"),
+                ),
+                (
+                    "Phone Number",
+                    record.get("phone"),
+                ),
+                (
+                    "Email Address",
+                    record.get("email"),
+                ),
+                (
+                    "Customer Type",
+                    record.get("customer_type"),
+                ),
+                (
+                    "Preferred Contact",
+                    record.get("preferred_contact"),
+                ),
+                (
+                    "Request Entered By",
+                    record.get("requested_by"),
+                ),
+            ],
+        ),
+        (
+            "Preferred Pickup Information",
+            [
+                (
+                    "Pickup Address",
+                    pickup_full_address,
+                ),
+                (
+                    "Pickup Area / Route",
+                    record.get("pickup_area"),
+                ),
+                (
+                    "Preferred Pickup Date",
+                    record.get("preferred_pickup_date"),
+                ),
+                (
+                    "Preferred Pickup Window",
+                    record.get("preferred_pickup_window"),
+                ),
+                (
+                    "Pickup Flexibility",
+                    record.get("pickup_flexibility"),
+                ),
+                (
+                    "Pickup Notes",
+                    record.get("pickup_notes"),
+                ),
+            ],
+        ),
+        (
+            "Destination and Recipient",
+            [
+                (
+                    "Destination Country",
+                    record.get("destination_country"),
+                ),
+                (
+                    "Destination City / Area",
+                    record.get("destination_city"),
+                ),
+                (
+                    "Recipient Name",
+                    record.get("recipient_name"),
+                ),
+                (
+                    "Recipient Phone",
+                    record.get("recipient_phone"),
+                ),
+            ],
+        ),
+        (
+            "Shipment Details",
+            [
+                (
+                    "Item Type",
+                    record.get("item_type"),
+                ),
+                (
+                    "Quantity",
+                    record.get("quantity"),
+                ),
+                (
+                    "Estimated Weight",
+                    record.get("estimated_weight"),
+                ),
+                (
+                    "Preferred Shipping Option",
+                    record.get("shipping_option"),
+                ),
+                (
+                    "Shipment Mode",
+                    record.get("shipment_mode"),
+                ),
+                (
+                    "Declared Value",
+                    record.get("declared_value"),
+                ),
+                (
+                    "Special Handling",
+                    record.get("special_handling"),
+                ),
+                (
+                    "Additional Shipment Notes",
+                    record.get("shipment_notes"),
+                ),
+            ],
+        ),
+        (
+            "Payment Preference",
+            [
+                (
+                    "Payment Preference",
+                    record.get("payment_terms"),
+                ),
+                (
+                    "Payment Notes",
+                    record.get("payment_notes"),
+                ),
+                (
+                    "Current Payment Status",
+                    record.get("payment_status"),
+                ),
+                (
+                    "Current Release Status",
+                    record.get("release_status"),
+                ),
+            ],
+        ),
+    ]
+
+    for section_title, section_rows in sections:
+        story.extend(
+            _pdf_section_table(
+                section_title,
+                section_rows,
+                label_style,
+                value_style,
+                section_style,
+            )
+        )
+
+    story.append(
+        Paragraph(
+            (
+                "Keep this confirmation for your records. Use the Shipment ID "
+                "when contacting Solomon Shipping, checking shipment status, "
+                "reviewing payment information, or requesting changes."
+            ),
+            small_style,
+        )
+    )
+
+    document.build(
+        story,
+        onFirstPage=_draw_confirmation_footer,
+        onLaterPages=_draw_confirmation_footer,
+    )
+
+    pdf_bytes = buffer.getvalue()
+    buffer.close()
+
+    return pdf_bytes
+
+
+def _parse_labeled_notes(notes: Any) -> dict[str, str]:
+    """Parse the labeled lines stored in the shipment notes column."""
+
+    parsed: dict[str, str] = {}
+    clean_notes = _confirmation_value(
+        notes,
+        "",
+    )
+
+    for line in clean_notes.splitlines():
+        if ":" not in line:
+            continue
+
+        label, value = line.split(
+            ":",
+            1,
+        )
+
+        parsed[label.strip().lower()] = (
+            value.strip()
+        )
+
+    return parsed
+
+
+def load_saved_shipment_confirmation(
+    shipment_id: str,
+    phone: str,
+) -> dict[str, Any] | None:
+    """
+    Retrieve a previously saved request using an exact Shipment ID and phone.
+
+    Requiring both values prevents a public user from downloading another
+    customer's confirmation by guessing only a Shipment ID.
+    """
+
+    engine, _ = resolve_database_engine()
+
+    with engine.connect() as database:
+        verify_required_tables(database)
+
+        row = database.execute(
+            text(
+                f"""
+                SELECT
+                    s.shipment_id,
+                    s.customer_id,
+                    s.customer_name,
+                    s.shipment_date,
+                    s.item_type,
+                    s.quantity,
+                    s.origin_city,
+                    s.origin_state,
+                    s.destination_country,
+                    s.destination_city,
+                    s.current_status,
+                    s.payment_status,
+                    s.release_status,
+                    s.notes AS shipment_notes,
+                    s.service_type,
+                    s.shipment_mode,
+                    c.phone,
+                    c.email,
+                    c.customer_type,
+                    p.pickup_id,
+                    p.pickup_date,
+                    p.pickup_time_window,
+                    p.pickup_address,
+                    p.pickup_status,
+                    p.notes AS pickup_record_notes,
+                    (
+                        SELECT sh.status_date
+                        FROM {DATABASE_SCHEMA}.status_history sh
+                        WHERE sh.shipment_id = s.shipment_id
+                        ORDER BY sh.status_date ASC
+                        LIMIT 1
+                    ) AS submitted_at,
+                    (
+                        SELECT sh.updated_by
+                        FROM {DATABASE_SCHEMA}.status_history sh
+                        WHERE sh.shipment_id = s.shipment_id
+                        ORDER BY sh.status_date ASC
+                        LIMIT 1
+                    ) AS requested_by
+                FROM {DATABASE_SCHEMA}.shipments s
+                LEFT JOIN {DATABASE_SCHEMA}.customers c
+                    ON c.customer_id = s.customer_id
+                LEFT JOIN LATERAL (
+                    SELECT pickup_record.*
+                    FROM {DATABASE_SCHEMA}.pickup_schedule pickup_record
+                    WHERE pickup_record.shipment_id = s.shipment_id
+                    ORDER BY
+                        pickup_record.pickup_date DESC NULLS LAST,
+                        pickup_record.pickup_id DESC
+                    LIMIT 1
+                ) p ON TRUE
+                WHERE
+                    UPPER(BTRIM(s.shipment_id))
+                    = UPPER(BTRIM(:shipment_id))
+                    AND REGEXP_REPLACE(
+                        COALESCE(c.phone, ''),
+                        '[^0-9]',
+                        '',
+                        'g'
+                    )
+                    =
+                    REGEXP_REPLACE(
+                        :phone,
+                        '[^0-9]',
+                        '',
+                        'g'
+                    )
+                LIMIT 1;
+                """
+            ),
+            {
+                "shipment_id": (
+                    shipment_id.strip().upper()
+                ),
+                "phone": phone.strip(),
+            },
+        ).mappings().first()
+
+    if row is None:
+        return None
+
+    row_data = dict(row)
+    note_fields = _parse_labeled_notes(
+        row_data.get("shipment_notes")
+    )
+
+    return {
+        "shipment_id": row_data.get("shipment_id"),
+        "customer_id": row_data.get("customer_id"),
+        "pickup_id": row_data.get("pickup_id"),
+        "request_date": (
+            row_data.get("submitted_at")
+            or row_data.get("shipment_date")
+        ),
+        "request_status": row_data.get("current_status"),
+        "pickup_status": row_data.get("pickup_status"),
+        "entered_from_portal": "Customer Portal",
+        "requested_by": (
+            row_data.get("requested_by")
+            or "Customer"
+        ),
+        "customer_name": row_data.get("customer_name"),
+        "phone": row_data.get("phone"),
+        "email": row_data.get("email"),
+        "customer_type": row_data.get("customer_type"),
+        "preferred_contact": note_fields.get(
+            "preferred contact"
+        ),
+        "pickup_full_address": row_data.get(
+            "pickup_address"
+        ),
+        "pickup_city": row_data.get("origin_city"),
+        "pickup_state": row_data.get("origin_state"),
+        "pickup_area": note_fields.get("pickup area"),
+        "preferred_pickup_date": row_data.get("pickup_date"),
+        "preferred_pickup_window": (
+            row_data.get("pickup_time_window")
+            or note_fields.get(
+                "preferred pickup window"
+            )
+        ),
+        "pickup_flexibility": note_fields.get(
+            "pickup flexibility"
+        ),
+        "pickup_notes": (
+            note_fields.get("pickup notes")
+            or row_data.get("pickup_record_notes")
+        ),
+        "destination_country": row_data.get(
+            "destination_country"
+        ),
+        "destination_city": row_data.get(
+            "destination_city"
+        ),
+        "recipient_name": note_fields.get("recipient"),
+        "recipient_phone": note_fields.get(
+            "recipient phone"
+        ),
+        "item_type": row_data.get("item_type"),
+        "quantity": row_data.get("quantity"),
+        "estimated_weight": note_fields.get(
+            "estimated weight"
+        ),
+        "shipping_option": row_data.get("service_type"),
+        "shipment_mode": row_data.get("shipment_mode"),
+        "declared_value": note_fields.get(
+            "declared value"
+        ),
+        "special_handling": note_fields.get(
+            "special handling"
+        ),
+        "shipment_notes": note_fields.get(
+            "shipment notes"
+        ),
+        "payment_terms": note_fields.get(
+            "payment preference"
+        ),
+        "payment_notes": note_fields.get(
+            "payment notes"
+        ),
+        "payment_status": row_data.get("payment_status"),
+        "release_status": row_data.get("release_status"),
+    }
+
 def safe_error_message(error: Exception) -> str:
     """Remove credentials if a driver includes a URL in an error message."""
 
@@ -994,26 +2029,175 @@ def get_page_subtitle() -> str:
 def initialize_request_storage() -> None:
     if "shipment_request_records" not in st.session_state:
         st.session_state.shipment_request_records = []
+
     if "last_shipment_confirmation" not in st.session_state:
         st.session_state.last_shipment_confirmation = None
 
+    if "retrieved_shipment_confirmation" not in st.session_state:
+        st.session_state.retrieved_shipment_confirmation = None
 
-def display_confirmation(record: dict[str, Any]) -> None:
-    st.success("Your shipment request was saved successfully.")
+
+def display_confirmation(
+    record: dict[str, Any],
+    key_prefix: str,
+    success_message: str = (
+        "Your shipment request was saved successfully."
+    ),
+) -> None:
+    """Show the confirmation and provide a customer-ready PDF download."""
+
+    st.success(success_message)
     st.markdown("### Your Shipment ID")
-    st.code(record["shipment_id"], language=None)
-    st.warning(
-        "Save this Shipment ID. You will need it to track the package or manage this shipment. "
-        "Your pickup is still pending confirmation."
+    st.code(
+        record["shipment_id"],
+        language=None,
     )
 
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Shipment Status", record["request_status"])
-    with col2:
-        st.metric("Pickup Status", record["pickup_status"])
-    with col3:
-        st.metric("Customer ID", record["customer_id"])
+    st.warning(
+        "Save this Shipment ID. You will need it to track the shipment, "
+        "review payment information, manage the request, or contact support. "
+        "The pickup window and final price are still pending confirmation."
+    )
+
+    first, second, third = st.columns(3)
+
+    with first:
+        st.metric(
+            "Shipment Status",
+            _confirmation_value(
+                record.get("request_status")
+            ),
+        )
+
+    with second:
+        st.metric(
+            "Pickup Status",
+            _confirmation_value(
+                record.get("pickup_status")
+            ),
+        )
+
+    with third:
+        st.metric(
+            "Customer ID",
+            _confirmation_value(
+                record.get("customer_id")
+            ),
+        )
+
+    pdf_bytes = build_shipment_confirmation_pdf(
+        record
+    )
+
+    st.download_button(
+        label=(
+            "Download Shipment Request "
+            "Confirmation (PDF)"
+        ),
+        data=pdf_bytes,
+        file_name=(
+            f"{record['shipment_id']}_"
+            "shipment_request_confirmation.pdf"
+        ),
+        mime="application/pdf",
+        key=f"{key_prefix}_pdf_download",
+        use_container_width=True,
+    )
+
+    st.caption(
+        "This PDF is a permanent request confirmation. "
+        "It is not the final invoice and does not confirm "
+        "the official pickup window."
+    )
+
+
+def render_confirmation_retrieval() -> None:
+    """Allow a customer to re-download a prior confirmation from Neon."""
+
+    st.subheader(
+        "Re-download an Existing Confirmation"
+    )
+
+    st.caption(
+        "Enter the exact Shipment ID and the phone number "
+        "used on the request. Both are required for privacy."
+    )
+
+    with st.form(
+        "retrieve_shipment_confirmation_form"
+    ):
+        lookup_left, lookup_right = st.columns(2)
+
+        with lookup_left:
+            lookup_shipment_id = st.text_input(
+                "Shipment ID",
+                placeholder="Example: SST-2026-0026",
+            )
+
+        with lookup_right:
+            lookup_phone = st.text_input(
+                "Phone Number Used on Request"
+            )
+
+        retrieve_submitted = st.form_submit_button(
+            "Find My Confirmation",
+            use_container_width=True,
+        )
+
+    if retrieve_submitted:
+        if not lookup_shipment_id.strip():
+            st.error(
+                "Enter the Shipment ID."
+            )
+
+        elif not lookup_phone.strip():
+            st.error(
+                "Enter the phone number used on the request."
+            )
+
+        else:
+            try:
+                with st.spinner(
+                    "Finding the saved shipment request..."
+                ):
+                    saved_record = (
+                        load_saved_shipment_confirmation(
+                            lookup_shipment_id,
+                            lookup_phone,
+                        )
+                    )
+
+                if saved_record is None:
+                    st.session_state.retrieved_shipment_confirmation = None
+                    st.error(
+                        "No matching request was found. Check the "
+                        "Shipment ID and phone number and try again."
+                    )
+
+                else:
+                    st.session_state.retrieved_shipment_confirmation = (
+                        saved_record
+                    )
+
+            except Exception as exc:
+                st.session_state.retrieved_shipment_confirmation = None
+                st.error(
+                    "The saved confirmation could not be retrieved."
+                )
+                st.caption(
+                    "Technical details: "
+                    f"{type(exc).__name__}: "
+                    f"{safe_error_message(exc)}"
+                )
+
+    if st.session_state.retrieved_shipment_confirmation:
+        display_confirmation(
+            st.session_state.retrieved_shipment_confirmation,
+            key_prefix="retrieved_confirmation",
+            success_message=(
+                "Your saved shipment request was found."
+            ),
+        )
 
 
 def main() -> None:
@@ -1264,23 +2448,9 @@ def main() -> None:
                 st.session_state.shipment_request_records.append(request_record)
                 st.session_state.last_shipment_confirmation = request_record
 
-                display_confirmation(request_record)
-
-                st.caption(
-                    "Database connection used: "
-                    f"{request_record['database_connection']}"
-                )
-
-                st.markdown("### Request Summary")
-                request_df = pd.DataFrame([request_record])
-                st.dataframe(request_df, use_container_width=True)
-
-                csv_data = request_df.to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    label="Download Shipment Confirmation",
-                    data=csv_data,
-                    file_name=f"{request_record['shipment_id']}_shipment_confirmation.csv",
-                    mime="text/csv",
+                display_confirmation(
+                    request_record,
+                    key_prefix="new_confirmation",
                 )
 
             except Exception as exc:
@@ -1294,8 +2464,20 @@ def main() -> None:
                 )
 
     elif st.session_state.last_shipment_confirmation:
-        with st.expander("View the most recent shipment confirmation"):
-            display_confirmation(st.session_state.last_shipment_confirmation)
+        with st.expander(
+            "View and download the most recent shipment confirmation"
+        ):
+            display_confirmation(
+                st.session_state.last_shipment_confirmation,
+                key_prefix="recent_confirmation",
+                success_message=(
+                    "Your most recent shipment confirmation is ready."
+                ),
+            )
+
+    st.divider()
+
+    render_confirmation_retrieval()
 
     st.divider()
     st.subheader("How the Pickup Confirmation Process Works")

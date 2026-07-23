@@ -1,18 +1,16 @@
 from __future__ import annotations
 
-from datetime import datetime
-from random import randint
+import os
+import re
+from datetime import date, datetime
+from typing import Any
+from uuid import uuid4
 
 import pandas as pd
 import streamlit as st
+from sqlalchemy import URL, create_engine, text
+from sqlalchemy.engine import Engine
 
-from src.data_loader import (
-    load_drivers,
-    load_pickup_capacity,
-    load_pickups,
-    load_shipment_change_history,
-    load_shipments,
-)
 from src.styles import apply_custom_styles, hero, sidebar_shipping_options
 
 
@@ -22,9 +20,10 @@ st.set_page_config(
     layout="wide",
 )
 
+SCHEMA = "solomon_shipping"
 
 PICKUP_STATUSES = [
-    "Pending",
+    "Pending Confirmation",
     "Scheduled",
     "Rescheduled",
     "Driver Assigned",
@@ -35,7 +34,6 @@ PICKUP_STATUSES = [
     "Cancelled",
     "No Show",
 ]
-
 
 PICKUP_WINDOWS = [
     "Morning",
@@ -49,26 +47,7 @@ PICKUP_WINDOWS = [
     "4 PM – 6 PM",
 ]
 
-
-APPROVAL_DECISIONS = [
-    "Approve",
-    "Reject",
-    "Needs Follow-Up",
-]
-
-
-CHANGE_TYPES_TO_REVIEW = [
-    "Request Pickup Reschedule",
-    "Request Shipment Cancellation",
-    "Update Pickup Notes",
-    "Update Contact Information",
-    "General Shipment Change Request",
-    "Reschedule Requested",
-    "Cancellation Requested",
-]
-
-
-DEFAULT_PICKUP_AREAS = [
+DEFAULT_AREAS = [
     "Queens",
     "Brooklyn",
     "Bronx",
@@ -81,1014 +60,1878 @@ DEFAULT_PICKUP_AREAS = [
     "Other",
 ]
 
-
-def initialize_pickup_session_storage() -> None:
-    """
-    Store staff/owner pickup updates during the current MVP session.
-    Later, these records should be saved to a database.
-    """
-
-    if "pickup_updates" not in st.session_state:
-        st.session_state.pickup_updates = []
-
-    if "reviewed_change_requests" not in st.session_state:
-        st.session_state.reviewed_change_requests = []
+REVIEW_TYPES = [
+    "Request Pickup Reschedule",
+    "Request Shipment Cancellation",
+    "Update Pickup Notes",
+    "Update Contact Information",
+    "General Shipment Change Request",
+    "Reschedule Requested",
+    "Cancellation Requested",
+]
 
 
-def generate_update_id(prefix: str = "PU") -> str:
-    """
-    Generate a simple update ID for the MVP.
-    """
+def secret(name: str) -> str:
+    value = os.getenv(name, "").strip()
 
-    today = datetime.now().strftime("%Y%m%d")
-    random_number = randint(1000, 9999)
-    return f"{prefix}-{today}-{random_number}"
+    if value:
+        return value
 
+    try:
+        return str(
+            st.secrets.get(name, "")
+        ).strip()
 
-def get_portal_label() -> str:
-    """
-    Return current user role based on portal mode.
-    """
-
-    portal_mode = st.session_state.get("portal_mode", "")
-
-    if portal_mode == "owner":
-        return "Owner"
-
-    if portal_mode == "staff":
-        return "Staff"
-
-    return "Staff"
+    except (
+        FileNotFoundError,
+        KeyError,
+        TypeError,
+        AttributeError,
+    ):
+        return ""
 
 
-def safe_get(record: pd.Series, column: str, default: str = "Not Available") -> str:
-    """
-    Safely get a value from a pandas Series.
-    """
+@st.cache_resource(show_spinner=False)
+def db_engine() -> Engine:
+    database_url = secret("DATABASE_URL")
 
-    value = record.get(column, default)
+    if database_url:
+        if database_url.startswith("postgres://"):
+            database_url = (
+                "postgresql://"
+                + database_url[len("postgres://"):]
+            )
 
-    if pd.isna(value):
+        target: str | URL = database_url
+
+    else:
+        values = {
+            "user": secret("DB_USER"),
+            "password": secret("DB_PASSWORD"),
+            "host": secret("DB_HOST"),
+            "port": secret("DB_PORT") or "5432",
+            "database": secret("DB_NAME"),
+            "sslmode": secret("DB_SSLMODE") or "require",
+        }
+
+        missing = [
+            name
+            for key, name in {
+                "user": "DB_USER",
+                "password": "DB_PASSWORD",
+                "host": "DB_HOST",
+                "database": "DB_NAME",
+            }.items()
+            if not values[key]
+        ]
+
+        if missing:
+            raise RuntimeError(
+                "Missing Streamlit Secrets: "
+                + ", ".join(missing)
+            )
+
+        try:
+            port = int(values["port"])
+        except ValueError:
+            port = 5432
+
+        target = URL.create(
+            "postgresql+psycopg2",
+            username=values["user"],
+            password=values["password"],
+            host=values["host"],
+            port=port,
+            database=values["database"],
+            query={
+                "sslmode": values["sslmode"]
+            },
+        )
+
+    engine = create_engine(
+        target,
+        pool_pre_ping=True,
+        pool_recycle=300,
+        connect_args={
+            "connect_timeout": 15,
+            "application_name": (
+                "solomon_shipping_schedule_pickup"
+            ),
+        },
+    )
+
+    with engine.connect() as connection:
+        connection.execute(
+            text("SELECT 1")
+        )
+
+    return engine
+
+
+def safe_error(
+    error: Exception,
+) -> str:
+    message = str(error)
+
+    message = re.sub(
+        r"postgres(?:ql)?(?:\+\w+)?://[^@\s]+@",
+        "postgresql://***:***@",
+        message,
+        flags=re.IGNORECASE,
+    )
+
+    return re.sub(
+        r"password\s*=\s*[^,\s]+",
+        "password=***",
+        message,
+        flags=re.IGNORECASE,
+    )
+
+
+def clean(
+    value: Any,
+    default: str = "Not Available",
+) -> str:
+    if value is None:
         return default
 
-    return str(value)
+    try:
+        if pd.isna(value):
+            return default
+
+    except (TypeError, ValueError):
+        pass
+
+    value = str(value).strip()
+
+    return value or default
 
 
-def prepare_pickup_dataframe(pickups: pd.DataFrame) -> pd.DataFrame:
-    """
-    Standardize pickup dataframe display columns when available.
-    """
+def portal_role() -> str:
+    mode = str(
+        st.session_state.get(
+            "portal_mode",
+            "staff",
+        )
+    ).lower()
 
-    if pickups.empty:
-        return pickups
+    return {
+        "owner": "Owner",
+        "admin": "Admin",
+    }.get(
+        mode,
+        "Staff",
+    )
 
-    display_df = pickups.copy()
 
-    preferred_columns = [
-        "pickup_id",
-        "shipment_id",
-        "customer_id",
-        "customer_name",
-        "pickup_date",
-        "pickup_window",
-        "preferred_pickup_date",
-        "preferred_pickup_window",
-        "confirmed_pickup_date",
-        "confirmed_pickup_window",
-        "pickup_area",
-        "pickup_address",
-        "pickup_city",
-        "pickup_state",
-        "pickup_zip",
-        "assigned_staff",
-        "assigned_driver",
-        "pickup_status",
-        "driver_status",
-        "customer_notified",
-        "notes",
+def verify_tables(
+    engine: Engine,
+) -> None:
+    required = [
+        "shipments",
+        "pickup_schedule",
+        "drivers",
+        "pickup_capacity",
+        "shipment_change_history",
+        "status_history",
     ]
 
-    available_columns = [col for col in preferred_columns if col in display_df.columns]
-
-    if available_columns:
-        return display_df[available_columns].copy()
-
-    return display_df
-
-
-def get_driver_options(drivers: pd.DataFrame) -> list[str]:
-    """
-    Create driver dropdown options from drivers.csv.
-    """
-
-    if drivers.empty or "driver_name" not in drivers.columns:
-        return [
-            "Unassigned",
-            "Kevin Brown",
-            "Dwayne Harris",
-            "Alicia Grant",
-            "Jason Clarke",
-            "Other",
+    with engine.connect() as connection:
+        missing = [
+            f"{SCHEMA}.{table_name}"
+            for table_name in required
+            if connection.execute(
+                text(
+                    "SELECT TO_REGCLASS(:name)"
+                ),
+                {
+                    "name": (
+                        f"{SCHEMA}.{table_name}"
+                    )
+                },
+            ).scalar_one_or_none()
+            is None
         ]
 
-    active_drivers = drivers.copy()
-
-    if "active_status" in active_drivers.columns:
-        active_drivers = active_drivers[
-            active_drivers["active_status"].astype(str).isin(["Active", "Backup"])
-        ]
-
-    driver_names = active_drivers["driver_name"].dropna().astype(str).tolist()
-
-    return ["Unassigned"] + sorted(driver_names) + ["Other"]
+    if missing:
+        raise RuntimeError(
+            "Required Neon tables are missing: "
+            + ", ".join(missing)
+        )
 
 
-def get_pickup_area_options(
-    pickups: pd.DataFrame,
-    pickup_capacity: pd.DataFrame,
-) -> list[str]:
-    """
-    Create pickup area dropdown options using pickup_capacity, pickups, and defaults.
-    """
-
-    areas = set(DEFAULT_PICKUP_AREAS)
-
-    if not pickup_capacity.empty and "pickup_area" in pickup_capacity.columns:
-        areas.update(pickup_capacity["pickup_area"].dropna().astype(str).tolist())
-
-    if not pickups.empty and "pickup_area" in pickups.columns:
-        areas.update(pickups["pickup_area"].dropna().astype(str).tolist())
-
-    return sorted(areas)
-
-
-def filter_capacity(
-    pickup_capacity: pd.DataFrame,
-    pickup_area: str,
-    pickup_date: str,
+def read_df(
+    engine: Engine,
+    query: str,
+    params: dict[str, Any] | None = None,
 ) -> pd.DataFrame:
-    """
-    Return capacity record for selected pickup area and date.
-    """
-
-    if pickup_capacity.empty:
-        return pd.DataFrame()
-
-    required_columns = ["pickup_area", "pickup_date"]
-
-    if any(column not in pickup_capacity.columns for column in required_columns):
-        return pd.DataFrame()
-
-    filtered = pickup_capacity[
-        (pickup_capacity["pickup_area"].astype(str).str.lower() == pickup_area.lower())
-        & (pickup_capacity["pickup_date"].astype(str) == str(pickup_date))
-    ].copy()
-
-    return filtered
-
-
-def render_capacity_status(capacity_record: pd.DataFrame) -> None:
-    """
-    Render capacity status cards for selected area/date.
-    """
-
-    if capacity_record.empty:
-        st.info(
-            "No capacity record found for this area/date. Staff can still schedule manually, "
-            "but capacity should be reviewed."
+    with engine.connect() as connection:
+        return pd.read_sql_query(
+            text(query),
+            connection,
+            params=params or {},
         )
-        return
-
-    record = capacity_record.iloc[0]
-
-    max_pickups = int(record.get("max_pickups", 0))
-    scheduled_pickups = int(record.get("scheduled_pickups", 0))
-    available_slots = int(record.get("available_slots", 0))
-    capacity_status = str(record.get("capacity_status", "Not Available"))
-    assigned_driver_ids = str(record.get("assigned_driver_ids", "Not Available"))
-
-    col1, col2, col3, col4 = st.columns(4)
-
-    with col1:
-        st.metric("Max Pickups", max_pickups)
-
-    with col2:
-        st.metric("Scheduled", scheduled_pickups)
-
-    with col3:
-        st.metric("Available Slots", available_slots)
-
-    with col4:
-        st.metric("Capacity Status", capacity_status)
-
-    with st.container(border=True):
-        st.markdown("#### Assigned Driver IDs")
-        st.write(assigned_driver_ids)
-
-    if capacity_status.lower() == "full" or available_slots <= 0:
-        st.error(
-            "This route/date is currently full. Consider choosing another date, "
-            "adding a backup driver, or placing the pickup on a waitlist."
-        )
-    elif capacity_status.lower() == "limited":
-        st.warning(
-            "This route/date has limited availability. Confirm carefully before scheduling."
-        )
-    else:
-        st.success("This route/date has pickup availability.")
 
 
-def filter_pending_change_requests(change_history: pd.DataFrame) -> pd.DataFrame:
-    """
-    Return pending customer change requests that staff/owner may need to review.
-    """
-
-    if change_history.empty:
-        return pd.DataFrame()
-
-    filtered = change_history.copy()
-
-    if "approval_status" in filtered.columns:
-        filtered = filtered[
-            filtered["approval_status"].astype(str).str.lower().eq("pending")
-        ]
-
-    if "change_type" in filtered.columns:
-        filtered = filtered[
-            filtered["change_type"].astype(str).isin(CHANGE_TYPES_TO_REVIEW)
-        ]
-
-    if "change_date" in filtered.columns:
-        filtered = filtered.sort_values("change_date", ascending=False)
-
-    return filtered
-
-
-def get_session_customer_change_requests() -> pd.DataFrame:
-    """
-    Pull customer-submitted change requests from session state.
-    These come from the customer Manage Shipment page during the current session.
-    """
-
-    records = st.session_state.get("customer_change_requests", [])
-
-    if not records:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(records)
-
-    if "approval_status" in df.columns:
-        df = df[df["approval_status"].astype(str).str.lower().eq("pending")]
-
-    if "change_date" in df.columns:
-        df = df.sort_values("change_date", ascending=False)
-
-    return df
-
-
-def combine_change_requests(
-    csv_change_history: pd.DataFrame,
-    session_change_requests: pd.DataFrame,
+def load_pickups(
+    engine: Engine,
 ) -> pd.DataFrame:
-    """
-    Combine CSV-based pending requests with session-submitted requests.
-    """
+    return read_df(
+        engine,
+        f"""
+        SELECT
+            p.pickup_id,
+            p.shipment_id,
+            p.customer_id,
+            p.customer_name,
+            p.pickup_date,
+            p.pickup_time_window,
+            p.pickup_address,
+            p.assigned_staff,
+            p.pickup_status,
+            p.notes,
+            p.driver_id,
+            d.driver_name,
+            d.phone AS driver_phone,
+            d.vehicle_type,
+            d.vehicle_plate,
+            d.active_status
+                AS driver_active_status,
+            s.current_status
+                AS shipment_status,
+            s.destination_city,
+            s.destination_country,
+            s.service_type,
+            s.shipment_mode
+        FROM {SCHEMA}.pickup_schedule p
+        LEFT JOIN {SCHEMA}.drivers d
+            ON d.driver_id = p.driver_id
+        LEFT JOIN {SCHEMA}.shipments s
+            ON s.shipment_id = p.shipment_id
+        ORDER BY
+            p.pickup_date ASC NULLS LAST,
+            p.created_at DESC
+        """,
+    )
 
-    frames = []
 
-    if not csv_change_history.empty:
-        frames.append(csv_change_history)
+def load_drivers(
+    engine: Engine,
+) -> pd.DataFrame:
+    return read_df(
+        engine,
+        f"""
+        SELECT
+            driver_id,
+            driver_name,
+            phone,
+            home_base,
+            service_areas,
+            primary_area,
+            max_pickups_per_day,
+            vehicle_type,
+            vehicle_plate,
+            active_status,
+            notes
+        FROM {SCHEMA}.drivers
+        ORDER BY
+            CASE
+                WHEN active_status = 'Active'
+                    THEN 1
+                WHEN active_status = 'Backup'
+                    THEN 2
+                ELSE 3
+            END,
+            driver_name
+        """,
+    )
 
-    if not session_change_requests.empty:
-        frames.append(session_change_requests)
 
-    if not frames:
-        return pd.DataFrame()
+def load_capacity(
+    engine: Engine,
+) -> pd.DataFrame:
+    return read_df(
+        engine,
+        f"""
+        SELECT
+            capacity_id,
+            pickup_date,
+            pickup_area,
+            assigned_driver_ids,
+            driver_count,
+            max_pickups,
+            scheduled_pickups,
+            available_slots,
+            capacity_status,
+            notes
+        FROM {SCHEMA}.pickup_capacity
+        ORDER BY
+            pickup_date,
+            pickup_area
+        """,
+    )
 
-    combined = pd.concat(frames, ignore_index=True)
 
-    if "change_date" in combined.columns:
-        combined = combined.sort_values("change_date", ascending=False)
+def load_pending_changes(
+    engine: Engine,
+) -> pd.DataFrame:
+    quoted_types = ", ".join(
+        "'" + item.replace("'", "''") + "'"
+        for item in REVIEW_TYPES
+    )
 
-    return combined
+    return read_df(
+        engine,
+        f"""
+        SELECT
+            change_id,
+            shipment_id,
+            customer_id,
+            customer_name,
+            change_date,
+            change_type,
+            old_value,
+            new_value,
+            requested_by,
+            requested_role,
+            request_reason,
+            approval_status,
+            approved_by,
+            approved_role,
+            approved_date,
+            notes
+        FROM {SCHEMA}.shipment_change_history
+        WHERE
+            LOWER(
+                COALESCE(
+                    approval_status,
+                    'pending'
+                )
+            ) = 'pending'
+            AND change_type IN (
+                {quoted_types}
+            )
+        ORDER BY
+            change_date DESC
+        """,
+    )
 
 
-def render_driver_directory(drivers: pd.DataFrame) -> None:
-    """
-    Show driver directory and service areas.
-    """
+def pickup_area(
+    notes: Any,
+) -> str:
+    match = re.search(
+        r"Pickup area:\s*([^\n\r]+)",
+        clean(notes, ""),
+        re.IGNORECASE,
+    )
 
-    st.subheader("Driver Directory")
+    if match:
+        return match.group(1).strip()
+
+    return "Other"
+
+
+def as_date(
+    value: Any,
+) -> date:
+    if isinstance(value, date):
+        return value
+
+    try:
+        return pd.to_datetime(
+            value
+        ).date()
+
+    except (TypeError, ValueError):
+        return date.today()
+
+
+def add_note(
+    existing: Any,
+    new_note: str,
+) -> str:
+    old = clean(existing, "")
+
+    if old:
+        return f"{old}\n\n{new_note}"
+
+    return new_note
+
+
+def driver_choices(
+    drivers: pd.DataFrame,
+) -> tuple[list[str], dict[str, str]]:
+    ids = [""]
+    labels = {
+        "": "Unassigned"
+    }
 
     if drivers.empty:
-        st.info("No driver data found. Please check that drivers.csv is inside the data folder.")
-        return
+        return ids, labels
 
-    display_columns = [
-        "driver_id",
-        "driver_name",
-        "phone",
-        "home_base",
-        "service_areas",
-        "primary_area",
-        "max_pickups_per_day",
-        "vehicle_type",
-        "vehicle_plate",
-        "active_status",
-        "notes",
+    active = drivers[
+        drivers["active_status"]
+        .astype(str)
+        .isin(
+            [
+                "Active",
+                "Backup",
+            ]
+        )
     ]
 
-    available_columns = [column for column in display_columns if column in drivers.columns]
+    for _, row in active.iterrows():
+        driver_id = clean(
+            row.get("driver_id"),
+            "",
+        )
 
-    st.dataframe(drivers[available_columns], use_container_width=True)
+        driver_name = clean(
+            row.get("driver_name"),
+            "",
+        )
+
+        if not driver_id or not driver_name:
+            continue
+
+        details = [
+            value
+            for value in [
+                clean(
+                    row.get("primary_area"),
+                    "",
+                ),
+                clean(
+                    row.get("vehicle_type"),
+                    "",
+                ),
+            ]
+            if value
+        ]
+
+        ids.append(driver_id)
+
+        labels[driver_id] = (
+            driver_name
+            + (
+                f" — {' | '.join(details)}"
+                if details
+                else ""
+            )
+        )
+
+    return ids, labels
 
 
-def render_capacity_board(pickup_capacity: pd.DataFrame) -> None:
-    """
-    Show pickup capacity board by area/date.
-    """
+def area_choices(
+    pickups: pd.DataFrame,
+    capacity: pd.DataFrame,
+) -> list[str]:
+    areas = set(DEFAULT_AREAS)
 
-    st.subheader("Pickup Capacity Board")
+    if not capacity.empty:
+        areas.update(
+            capacity["pickup_area"]
+            .dropna()
+            .astype(str)
+        )
 
-    if pickup_capacity.empty:
-        st.info("No pickup capacity data found. Please check that pickup_capacity.csv is inside the data folder.")
+    if not pickups.empty:
+        areas.update(
+            pickup_area(value)
+            for value in pickups["notes"]
+        )
+
+    return sorted(
+        area
+        for area in areas
+        if area
+    )
+
+
+def capacity_record(
+    capacity: pd.DataFrame,
+    area: str,
+    selected_date: date,
+) -> pd.DataFrame:
+    if capacity.empty:
+        return pd.DataFrame()
+
+    frame = capacity.copy()
+
+    frame["pickup_date"] = (
+        pd.to_datetime(
+            frame["pickup_date"],
+            errors="coerce",
+        )
+        .dt.date
+    )
+
+    return frame[
+        frame["pickup_area"]
+        .astype(str)
+        .str.lower()
+        .eq(area.lower())
+        & frame["pickup_date"]
+        .eq(selected_date)
+    ]
+
+
+def show_capacity(
+    frame: pd.DataFrame,
+) -> None:
+    if frame.empty:
+        st.info(
+            "No capacity record exists "
+            "for this area and date."
+        )
         return
 
-    filtered_capacity = pickup_capacity.copy()
+    row = frame.iloc[0]
 
-    filter_col1, filter_col2 = st.columns(2)
+    columns = st.columns(4)
 
-    with filter_col1:
-        if "pickup_area" in filtered_capacity.columns:
-            area_options = sorted(filtered_capacity["pickup_area"].dropna().astype(str).unique())
-            selected_areas = st.multiselect(
-                "Filter by Pickup Area",
-                options=area_options,
-                default=area_options,
+    values = [
+        (
+            "Max Pickups",
+            int(
+                row.get(
+                    "max_pickups",
+                    0,
+                )
+                or 0
+            ),
+        ),
+        (
+            "Scheduled",
+            int(
+                row.get(
+                    "scheduled_pickups",
+                    0,
+                )
+                or 0
+            ),
+        ),
+        (
+            "Available Slots",
+            int(
+                row.get(
+                    "available_slots",
+                    0,
+                )
+                or 0
+            ),
+        ),
+        (
+            "Capacity Status",
+            clean(
+                row.get(
+                    "capacity_status"
+                )
+            ),
+        ),
+    ]
+
+    for column, (
+        label,
+        value,
+    ) in zip(
+        columns,
+        values,
+    ):
+        with column:
+            st.metric(
+                label,
+                value,
             )
 
-            filtered_capacity = filtered_capacity[
-                filtered_capacity["pickup_area"].astype(str).isin(selected_areas)
-            ]
+    available = int(
+        row.get(
+            "available_slots",
+            0,
+        )
+        or 0
+    )
 
-    with filter_col2:
-        if "capacity_status" in filtered_capacity.columns:
-            status_options = sorted(filtered_capacity["capacity_status"].dropna().astype(str).unique())
-            selected_statuses = st.multiselect(
-                "Filter by Capacity Status",
-                options=status_options,
-                default=status_options,
+    status = clean(
+        row.get(
+            "capacity_status"
+        ),
+        "",
+    ).lower()
+
+    if (
+        status == "full"
+        or available <= 0
+    ):
+        st.error(
+            "This route and date are full."
+        )
+
+    elif status == "limited":
+        st.warning(
+            "This route and date have "
+            "limited availability."
+        )
+
+    else:
+        st.success(
+            "This route and date have "
+            "pickup availability."
+        )
+
+
+def add_status(
+    connection: Any,
+    shipment_id: str,
+    status: str,
+    updated_by: str,
+    notes: str,
+) -> None:
+    connection.execute(
+        text(
+            f"""
+            INSERT INTO {SCHEMA}.status_history (
+                status_id,
+                shipment_id,
+                status,
+                status_date,
+                updated_by,
+                notes
+            )
+            VALUES (
+                :status_id,
+                :shipment_id,
+                :status,
+                CURRENT_TIMESTAMP,
+                :updated_by,
+                :notes
+            )
+            """
+        ),
+        {
+            "status_id": (
+                "STAT-"
+                + uuid4().hex[:24].upper()
+            ),
+            "shipment_id": shipment_id,
+            "status": status,
+            "updated_by": updated_by,
+            "notes": notes,
+        },
+    )
+
+
+def mark_milestone(
+    connection: Any,
+    shipment_id: str,
+    milestone_code: str,
+    updated_by: str,
+) -> None:
+    milestone_table = connection.execute(
+        text(
+            """
+            SELECT TO_REGCLASS(
+                'solomon_shipping.shipment_milestones'
+            )
+            """
+        )
+    ).scalar_one_or_none()
+
+    if milestone_table is None:
+        return
+
+    connection.execute(
+        text(
+            f"""
+            UPDATE {SCHEMA}.shipment_milestones
+            SET
+                milestone_status = 'Achieved',
+                achieved_date = COALESCE(
+                    achieved_date,
+                    CURRENT_TIMESTAMP
+                ),
+                updated_by = :updated_by,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE
+                shipment_id = :shipment_id
+                AND milestone_code = :milestone_code
+            """
+        ),
+        {
+            "shipment_id": shipment_id,
+            "milestone_code": milestone_code,
+            "updated_by": updated_by,
+        },
+    )
+
+
+def save_pickup(
+    engine: Engine,
+    record: dict[str, Any],
+    selected_date: date,
+    window: str,
+    area: str,
+    driver_id: str,
+    status: str,
+    dispatcher: str,
+    notified: bool,
+    notes: str,
+) -> None:
+    pickup_id = clean(
+        record.get("pickup_id"),
+        "",
+    )
+
+    shipment_id = clean(
+        record.get("shipment_id"),
+        "",
+    )
+
+    if not pickup_id or not shipment_id:
+        raise RuntimeError(
+            "The selected pickup is "
+            "missing its ID."
+        )
+
+    entry = (
+        f"[{datetime.now():%Y-%m-%d %H:%M}] "
+        f"Pickup area: {area}\n"
+        f"Updated by: {dispatcher}\n"
+        f"Customer notified: "
+        f"{'Yes' if notified else 'No'}"
+    )
+
+    if notes.strip():
+        entry += (
+            "\nInternal notes: "
+            + notes.strip()
+        )
+
+    shipment_status = {
+        "Scheduled": "Pickup Scheduled",
+        "Rescheduled": "Pickup Scheduled",
+        "Driver Assigned": "Pickup Scheduled",
+        "Picked Up": "Picked Up",
+        "Completed": "Picked Up",
+        "Cancelled": "Cancelled",
+    }.get(status)
+
+    with engine.begin() as connection:
+        updated = connection.execute(
+            text(
+                f"""
+                UPDATE {SCHEMA}.pickup_schedule
+                SET
+                    pickup_date = :pickup_date,
+                    pickup_time_window =
+                        :pickup_time_window,
+                    driver_id =
+                        NULLIF(:driver_id, ''),
+                    assigned_staff =
+                        :assigned_staff,
+                    pickup_status =
+                        :pickup_status,
+                    notes = :notes,
+                    updated_at =
+                        CURRENT_TIMESTAMP
+                WHERE
+                    pickup_id = :pickup_id
+                """
+            ),
+            {
+                "pickup_date": selected_date,
+                "pickup_time_window": window,
+                "driver_id": driver_id,
+                "assigned_staff": dispatcher,
+                "pickup_status": status,
+                "notes": add_note(
+                    record.get("notes"),
+                    entry,
+                ),
+                "pickup_id": pickup_id,
+            },
+        ).rowcount
+
+        if updated != 1:
+            raise RuntimeError(
+                "The pickup record "
+                "was not updated."
             )
 
-            filtered_capacity = filtered_capacity[
-                filtered_capacity["capacity_status"].astype(str).isin(selected_statuses)
-            ]
+        if shipment_status:
+            current = connection.execute(
+                text(
+                    f"""
+                    SELECT
+                        current_status
+                    FROM {SCHEMA}.shipments
+                    WHERE
+                        shipment_id =
+                            :shipment_id
+                    FOR UPDATE
+                    """
+                ),
+                {
+                    "shipment_id": shipment_id
+                },
+            ).scalar_one_or_none()
 
-    if "pickup_date" in filtered_capacity.columns:
-        filtered_capacity = filtered_capacity.sort_values(["pickup_date", "pickup_area"])
+            if current != shipment_status:
+                connection.execute(
+                    text(
+                        f"""
+                        UPDATE {SCHEMA}.shipments
+                        SET
+                            current_status =
+                                :status,
+                            updated_at =
+                                CURRENT_TIMESTAMP
+                        WHERE
+                            shipment_id =
+                                :shipment_id
+                        """
+                    ),
+                    {
+                        "status": shipment_status,
+                        "shipment_id": shipment_id,
+                    },
+                )
 
-    st.dataframe(filtered_capacity, use_container_width=True)
+                add_status(
+                    connection,
+                    shipment_id,
+                    shipment_status,
+                    dispatcher,
+                    (
+                        "Updated from the "
+                        "Schedule Pickup page."
+                    ),
+                )
+
+        if status in {
+            "Scheduled",
+            "Rescheduled",
+            "Driver Assigned",
+        }:
+            mark_milestone(
+                connection,
+                shipment_id,
+                "PICKUP_SCHEDULED",
+                dispatcher,
+            )
+
+        elif status in {
+            "Picked Up",
+            "Completed",
+        }:
+            mark_milestone(
+                connection,
+                shipment_id,
+                "PICKED_UP",
+                dispatcher,
+            )
+
+
+def parse_reschedule(
+    value: str,
+) -> tuple[date | None, str]:
+    match = re.search(
+        r"(\d{4}-\d{2}-\d{2})"
+        r"\s*(?:—|-)?\s*(.*)",
+        value,
+    )
+
+    if not match:
+        return None, ""
+
+    try:
+        selected_date = datetime.strptime(
+            match.group(1),
+            "%Y-%m-%d",
+        ).date()
+
+    except ValueError:
+        selected_date = None
+
+    return (
+        selected_date,
+        match.group(2).strip(),
+    )
+
+
+def parse_contact(
+    value: str,
+) -> tuple[str, str]:
+    phone_match = re.search(
+        r"Phone:\s*([^;]+)",
+        value,
+        re.IGNORECASE,
+    )
+
+    email_match = re.search(
+        r"Email:\s*(.+)$",
+        value,
+        re.IGNORECASE,
+    )
+
+    phone = (
+        phone_match.group(1).strip()
+        if phone_match
+        else ""
+    )
+
+    email = (
+        email_match.group(1).strip()
+        if email_match
+        else ""
+    )
+
+    if phone.lower().startswith(
+        "no phone"
+    ):
+        phone = ""
+
+    if email.lower().startswith(
+        "no email"
+    ):
+        email = ""
+
+    return phone, email
+
+
+def apply_approved_change(
+    connection: Any,
+    change: dict[str, Any],
+    reviewer: str,
+) -> None:
+    shipment_id = clean(
+        change.get("shipment_id"),
+        "",
+    )
+
+    customer_id = clean(
+        change.get("customer_id"),
+        "",
+    )
+
+    change_type = clean(
+        change.get("change_type"),
+        "",
+    )
+
+    new_value = clean(
+        change.get("new_value"),
+        "",
+    )
+
+    if (
+        change_type
+        == "Request Pickup Reschedule"
+    ):
+        selected_date, window = (
+            parse_reschedule(new_value)
+        )
+
+        if selected_date is None:
+            raise RuntimeError(
+                "The requested pickup date "
+                "could not be read."
+            )
+
+        connection.execute(
+            text(
+                f"""
+                UPDATE {SCHEMA}.pickup_schedule
+                SET
+                    pickup_date =
+                        :pickup_date,
+                    pickup_time_window =
+                        COALESCE(
+                            NULLIF(
+                                :window,
+                                ''
+                            ),
+                            pickup_time_window
+                        ),
+                    pickup_status =
+                        'Rescheduled',
+                    updated_at =
+                        CURRENT_TIMESTAMP
+                WHERE
+                    shipment_id =
+                        :shipment_id
+                """
+            ),
+            {
+                "pickup_date": selected_date,
+                "window": window,
+                "shipment_id": shipment_id,
+            },
+        )
+
+        connection.execute(
+            text(
+                f"""
+                UPDATE {SCHEMA}.shipments
+                SET
+                    current_status =
+                        'Pickup Scheduled',
+                    updated_at =
+                        CURRENT_TIMESTAMP
+                WHERE
+                    shipment_id =
+                        :shipment_id
+                """
+            ),
+            {
+                "shipment_id": shipment_id
+            },
+        )
+
+        add_status(
+            connection,
+            shipment_id,
+            "Pickup Scheduled",
+            reviewer,
+            (
+                "Customer pickup reschedule "
+                "request approved."
+            ),
+        )
+
+        mark_milestone(
+            connection,
+            shipment_id,
+            "PICKUP_SCHEDULED",
+            reviewer,
+        )
+
+    elif (
+        change_type
+        == "Request Shipment Cancellation"
+    ):
+        connection.execute(
+            text(
+                f"""
+                UPDATE {SCHEMA}.shipments
+                SET
+                    current_status =
+                        'Cancelled',
+                    release_status =
+                        'Cancelled',
+                    updated_at =
+                        CURRENT_TIMESTAMP
+                WHERE
+                    shipment_id =
+                        :shipment_id
+                """
+            ),
+            {
+                "shipment_id": shipment_id
+            },
+        )
+
+        connection.execute(
+            text(
+                f"""
+                UPDATE {SCHEMA}.pickup_schedule
+                SET
+                    pickup_status =
+                        'Cancelled',
+                    updated_at =
+                        CURRENT_TIMESTAMP
+                WHERE
+                    shipment_id =
+                        :shipment_id
+                """
+            ),
+            {
+                "shipment_id": shipment_id
+            },
+        )
+
+        add_status(
+            connection,
+            shipment_id,
+            "Cancelled",
+            reviewer,
+            (
+                "Customer cancellation "
+                "request approved."
+            ),
+        )
+
+    elif (
+        change_type
+        == "Update Contact Information"
+    ):
+        phone, email = parse_contact(
+            new_value
+        )
+
+        if phone or email:
+            connection.execute(
+                text(
+                    f"""
+                    UPDATE {SCHEMA}.customers
+                    SET
+                        phone = CASE
+                            WHEN NULLIF(
+                                :phone,
+                                ''
+                            ) IS NOT NULL
+                                THEN :phone
+                            ELSE phone
+                        END,
+                        email = CASE
+                            WHEN NULLIF(
+                                :email,
+                                ''
+                            ) IS NOT NULL
+                                THEN :email
+                            ELSE email
+                        END,
+                        updated_at =
+                            CURRENT_TIMESTAMP
+                    WHERE
+                        customer_id =
+                            :customer_id
+                    """
+                ),
+                {
+                    "phone": phone,
+                    "email": email,
+                    "customer_id": customer_id,
+                },
+            )
+
+    elif (
+        change_type
+        == "Update Pickup Notes"
+    ):
+        pickup = connection.execute(
+            text(
+                f"""
+                SELECT
+                    pickup_id,
+                    notes
+                FROM {SCHEMA}.pickup_schedule
+                WHERE
+                    shipment_id =
+                        :shipment_id
+                ORDER BY
+                    created_at DESC
+                LIMIT 1
+                FOR UPDATE
+                """
+            ),
+            {
+                "shipment_id": shipment_id
+            },
+        ).mappings().first()
+
+        if pickup:
+            connection.execute(
+                text(
+                    f"""
+                    UPDATE {SCHEMA}.pickup_schedule
+                    SET
+                        notes = :notes,
+                        updated_at =
+                            CURRENT_TIMESTAMP
+                    WHERE
+                        pickup_id =
+                            :pickup_id
+                    """
+                ),
+                {
+                    "notes": add_note(
+                        pickup["notes"],
+                        (
+                            f"[{datetime.now():%Y-%m-%d %H:%M}] "
+                            "Approved customer "
+                            "pickup note:\n"
+                            f"{new_value}"
+                        ),
+                    ),
+                    "pickup_id": (
+                        pickup["pickup_id"]
+                    ),
+                },
+            )
+
+
+def review_change(
+    engine: Engine,
+    change: dict[str, Any],
+    decision: str,
+    reviewer: str,
+    role: str,
+    review_notes: str,
+) -> str:
+    status = {
+        "Approve": "Approved",
+        "Reject": "Rejected",
+        "Needs Follow-Up": (
+            "Needs Follow-Up"
+        ),
+    }[decision]
+
+    change_id = clean(
+        change.get("change_id"),
+        "",
+    )
+
+    if not change_id:
+        raise RuntimeError(
+            "The selected request has "
+            "no Change ID."
+        )
+
+    with engine.begin() as connection:
+        current = connection.execute(
+            text(
+                f"""
+                SELECT *
+                FROM {SCHEMA}.shipment_change_history
+                WHERE
+                    change_id = :change_id
+                FOR UPDATE
+                """
+            ),
+            {
+                "change_id": change_id
+            },
+        ).mappings().first()
+
+        if current is None:
+            raise RuntimeError(
+                "The change request "
+                "no longer exists."
+            )
+
+        if clean(
+            current.get(
+                "approval_status"
+            ),
+            "Pending",
+        ).lower() != "pending":
+            raise RuntimeError(
+                "This request has already "
+                "been reviewed."
+            )
+
+        if status == "Approved":
+            apply_approved_change(
+                connection,
+                dict(current),
+                reviewer,
+            )
+
+        connection.execute(
+            text(
+                f"""
+                UPDATE {SCHEMA}.shipment_change_history
+                SET
+                    approval_status =
+                        :status,
+                    approved_by =
+                        :reviewer,
+                    approved_role =
+                        :role,
+                    approved_date =
+                        CURRENT_TIMESTAMP,
+                    notes = CASE
+                        WHEN NULLIF(
+                            :review_notes,
+                            ''
+                        ) IS NULL
+                            THEN notes
+                        WHEN notes IS NULL
+                             OR BTRIM(notes) = ''
+                            THEN :review_notes
+                        ELSE
+                            notes
+                            || E'\n\nReview notes: '
+                            || :review_notes
+                    END
+                WHERE
+                    change_id =
+                        :change_id
+                """
+            ),
+            {
+                "status": status,
+                "reviewer": reviewer,
+                "role": role,
+                "review_notes": (
+                    review_notes.strip()
+                ),
+                "change_id": change_id,
+            },
+        )
+
+    return status
 
 
 def main() -> None:
-    """
-    Staff/Owner Schedule Pickup page.
-
-    This page is for operational control:
-    - review pickup requests
-    - review area/date capacity
-    - review driver availability
-    - approve/reject customer change requests
-    - assign driver/staff
-    - update pickup status
-    - mark pickups completed
-    """
-
     apply_custom_styles()
     sidebar_shipping_options()
-    initialize_pickup_session_storage()
 
-    role_label = get_portal_label()
-
-    pickups = load_pickups()
-    shipments = load_shipments()
-    drivers = load_drivers()
-    pickup_capacity = load_pickup_capacity()
-    change_history = load_shipment_change_history()
+    role = portal_role()
 
     hero(
         title="Schedule Pickup",
         subtitle=(
-            "Review pickup requests, check route capacity, assign drivers, confirm pickup windows, "
-            "approve customer changes, and update pickup status."
+            "Review pickup requests, check route "
+            "capacity, assign drivers, confirm pickup "
+            "windows, and review customer change requests."
         ),
     )
 
     st.markdown(
         f"""
-        <span class="badge-green">{role_label} Operations</span>
+        <span class="badge-green">{role} Operations</span>
         <span class="badge-dark">Pickup Scheduling</span>
-        <span class="badge-red">Driver Capacity</span>
+        <span class="badge-red">Neon Database</span>
         """,
         unsafe_allow_html=True,
     )
 
     st.write("")
 
-    # ---------------------------------------------------------
-    # Dispatch Overview
-    # ---------------------------------------------------------
-    st.subheader("Dispatch Overview")
+    try:
+        engine = db_engine()
+        verify_tables(engine)
 
-    total_drivers = len(drivers) if not drivers.empty else 0
+        pickups = load_pickups(engine)
+        drivers = load_drivers(engine)
+        capacity = load_capacity(engine)
+        pending_changes = (
+            load_pending_changes(engine)
+        )
 
-    active_drivers = 0
-    if not drivers.empty and "active_status" in drivers.columns:
-        active_drivers = int(drivers["active_status"].astype(str).eq("Active").sum())
+    except Exception as exc:
+        st.error(
+            "The Schedule Pickup page could "
+            "not load records from Neon."
+        )
 
-    total_capacity = 0
-    scheduled_pickups = 0
-    available_slots = 0
+        st.caption(
+            "Technical details: "
+            f"{type(exc).__name__}: "
+            f"{safe_error(exc)}"
+        )
 
-    if not pickup_capacity.empty:
-        if "max_pickups" in pickup_capacity.columns:
-            total_capacity = int(pickup_capacity["max_pickups"].fillna(0).sum())
+        return
 
-        if "scheduled_pickups" in pickup_capacity.columns:
-            scheduled_pickups = int(pickup_capacity["scheduled_pickups"].fillna(0).sum())
-
-        if "available_slots" in pickup_capacity.columns:
-            available_slots = int(pickup_capacity["available_slots"].fillna(0).sum())
-
-    pending_changes = combine_change_requests(
-        csv_change_history=filter_pending_change_requests(change_history),
-        session_change_requests=get_session_customer_change_requests(),
+    available_slots = (
+        int(
+            pd.to_numeric(
+                capacity["available_slots"],
+                errors="coerce",
+            )
+            .fillna(0)
+            .sum()
+        )
+        if not capacity.empty
+        else 0
     )
 
-    overview_col1, overview_col2, overview_col3, overview_col4 = st.columns(4)
+    active_drivers = (
+        int(
+            drivers["active_status"]
+            .astype(str)
+            .eq("Active")
+            .sum()
+        )
+        if not drivers.empty
+        else 0
+    )
 
-    with overview_col1:
-        st.metric("Total Drivers", total_drivers)
+    st.subheader(
+        "Dispatch Overview"
+    )
 
-    with overview_col2:
-        st.metric("Active Drivers", active_drivers)
+    metrics = st.columns(4)
 
-    with overview_col3:
-        st.metric("Available Slots", available_slots)
+    for column, (
+        label,
+        value,
+    ) in zip(
+        metrics,
+        [
+            (
+                "Pickup Records",
+                len(pickups),
+            ),
+            (
+                "Active Drivers",
+                active_drivers,
+            ),
+            (
+                "Available Slots",
+                available_slots,
+            ),
+            (
+                "Pending Changes",
+                len(pending_changes),
+            ),
+        ],
+    ):
+        with column:
+            st.metric(
+                label,
+                value,
+            )
 
-    with overview_col4:
-        st.metric("Pending Changes", len(pending_changes))
-
-    st.divider()
-
-    # ---------------------------------------------------------
-    # Capacity and Driver Tabs
-    # ---------------------------------------------------------
-    top_tabs = st.tabs(
+    tabs = st.tabs(
         [
             "Pickup Work Queue",
             "Capacity Board",
             "Driver Directory",
             "Customer Change Requests",
-            "Session Activity",
         ]
     )
 
-    # ---------------------------------------------------------
-    # Pickup Work Queue
-    # ---------------------------------------------------------
-    with top_tabs[0]:
+    with tabs[0]:
         if pickups.empty:
-            st.warning("No pickup schedule data found. Please check that pickup_schedule.csv is inside the data folder.")
-        else:
-            st.subheader("Pickup Work Queue")
-
-            st.markdown(
-                """
-                Use this section to look up a pickup, check route capacity, assign a driver,
-                confirm pickup timing, update status, or mark pickup completed.
-                """
+            st.info(
+                "No pickup records are "
+                "stored in Neon."
             )
 
-            lookup_options = []
+        else:
+            search_value = st.text_input(
+                "Search pickup ID, shipment ID, "
+                "customer, address, driver, or status"
+            )
 
-            if "pickup_id" in pickups.columns:
-                lookup_options.extend(pickups["pickup_id"].dropna().astype(str).tolist())
+            filtered = pickups.copy()
 
-            if "shipment_id" in pickups.columns:
-                lookup_options.extend(pickups["shipment_id"].dropna().astype(str).tolist())
-
-            lookup_options = sorted(set(lookup_options))
-
-            lookup_col1, lookup_col2 = st.columns([2, 1])
-
-            with lookup_col1:
-                search_term = st.text_input(
-                    "Search pickup ID, shipment ID, customer name, address, area, assigned driver, or status",
-                )
-
-            with lookup_col2:
-                selected_lookup = st.selectbox(
-                    "Or select pickup/shipment",
-                    options=[""] + lookup_options,
-                )
-
-            filtered_pickups = pickups.copy()
-
-            lookup_value = search_term.strip() or selected_lookup
-
-            if lookup_value:
-                searchable_columns = [
+            if search_value.strip():
+                search_columns = [
                     "pickup_id",
                     "shipment_id",
-                    "customer_id",
                     "customer_name",
                     "pickup_address",
-                    "pickup_city",
-                    "pickup_state",
-                    "pickup_zip",
-                    "pickup_area",
-                    "assigned_staff",
-                    "assigned_driver",
                     "pickup_status",
-                    "driver_status",
+                    "driver_name",
+                    "assigned_staff",
                     "notes",
                 ]
 
-                available_search_columns = [
-                    col for col in searchable_columns if col in filtered_pickups.columns
-                ]
-
-                if available_search_columns:
-                    search_text = filtered_pickups[available_search_columns].astype(str).agg(
+                combined = (
+                    filtered[search_columns]
+                    .fillna("")
+                    .astype(str)
+                    .agg(
                         " ".join,
                         axis=1,
                     )
-
-                    filtered_pickups = filtered_pickups[
-                        search_text.str.lower().str.contains(
-                            lookup_value.lower(),
-                            na=False,
-                        )
-                    ]
-
-            st.markdown("### Pickup Records")
-
-            if filtered_pickups.empty:
-                st.info("No pickup records matched your search.")
-            else:
-                st.dataframe(
-                    prepare_pickup_dataframe(filtered_pickups),
-                    use_container_width=True,
                 )
 
-            st.divider()
-
-            st.subheader("Update Pickup")
-
-            if filtered_pickups.empty:
-                st.info("Search for or select a pickup record above to update pickup details.")
-            else:
-                selected_record_options = []
-
-                if "pickup_id" in filtered_pickups.columns:
-                    selected_record_options = (
-                        filtered_pickups["pickup_id"].dropna().astype(str).unique().tolist()
+                filtered = filtered[
+                    combined.str.contains(
+                        search_value.strip(),
+                        case=False,
+                        na=False,
                     )
-                    selected_label = "Select Pickup ID"
-                    selected_column = "pickup_id"
-                elif "shipment_id" in filtered_pickups.columns:
-                    selected_record_options = (
-                        filtered_pickups["shipment_id"].dropna().astype(str).unique().tolist()
-                    )
-                    selected_label = "Select Shipment ID"
-                    selected_column = "shipment_id"
-                else:
-                    selected_record_options = filtered_pickups.index.astype(str).tolist()
-                    selected_label = "Select Record"
-                    selected_column = None
-
-                selected_record_id = st.selectbox(
-                    selected_label,
-                    options=selected_record_options,
-                )
-
-                if selected_column:
-                    selected_pickup_df = filtered_pickups[
-                        filtered_pickups[selected_column].astype(str) == selected_record_id
-                    ].copy()
-                else:
-                    selected_pickup_df = filtered_pickups.loc[
-                        [int(selected_record_id)]
-                    ].copy()
-
-                if not selected_pickup_df.empty:
-                    pickup_record = selected_pickup_df.iloc[0]
-
-                    pickup_id = safe_get(pickup_record, "pickup_id", selected_record_id)
-                    shipment_id = safe_get(pickup_record, "shipment_id")
-                    customer_name = safe_get(pickup_record, "customer_name")
-                    current_pickup_status = safe_get(pickup_record, "pickup_status", "Pending")
-                    current_pickup_date = safe_get(pickup_record, "pickup_date", "")
-                    current_pickup_window = safe_get(pickup_record, "pickup_window", "Flexible")
-                    current_pickup_area = safe_get(pickup_record, "pickup_area", "Other")
-                    current_driver_status = safe_get(pickup_record, "driver_status", "Not Available")
-                    current_assigned_driver = safe_get(pickup_record, "assigned_driver", "Unassigned")
-
-                    summary_col1, summary_col2, summary_col3, summary_col4 = st.columns(4)
-
-                    with summary_col1:
-                        with st.container(border=True):
-                            st.markdown("#### Pickup ID")
-                            st.write(pickup_id)
-
-                    with summary_col2:
-                        with st.container(border=True):
-                            st.markdown("#### Shipment ID")
-                            st.write(shipment_id)
-
-                    with summary_col3:
-                        with st.container(border=True):
-                            st.markdown("#### Customer")
-                            st.write(customer_name)
-
-                    with summary_col4:
-                        with st.container(border=True):
-                            st.markdown("#### Current Status")
-                            st.write(current_pickup_status)
-
-                    st.markdown("### Check Capacity Before Scheduling")
-
-                    capacity_col1, capacity_col2 = st.columns(2)
-
-                    pickup_area_options = get_pickup_area_options(
-                        pickups=pickups,
-                        pickup_capacity=pickup_capacity,
-                    )
-
-                    if current_pickup_area not in pickup_area_options:
-                        pickup_area_options.append(current_pickup_area)
-
-                    with capacity_col1:
-                        selected_pickup_area = st.selectbox(
-                            "Pickup Area",
-                            pickup_area_options,
-                            index=(
-                                pickup_area_options.index(current_pickup_area)
-                                if current_pickup_area in pickup_area_options
-                                else 0
-                            ),
-                        )
-
-                    with capacity_col2:
-                        selected_capacity_date = st.date_input(
-                            "Pickup Date for Capacity Check",
-                        )
-
-                    capacity_record = filter_capacity(
-                        pickup_capacity=pickup_capacity,
-                        pickup_area=selected_pickup_area,
-                        pickup_date=str(selected_capacity_date),
-                    )
-
-                    render_capacity_status(capacity_record)
-
-                    st.divider()
-
-                    with st.form("pickup_update_form"):
-                        st.markdown("### Confirm / Update Pickup Details")
-
-                        update_col1, update_col2 = st.columns(2)
-
-                        with update_col1:
-                            confirmed_pickup_date = st.date_input(
-                                "Confirmed Pickup Date",
-                                value=selected_capacity_date,
-                            )
-
-                            confirmed_pickup_window = st.selectbox(
-                                "Confirmed Pickup Window",
-                                PICKUP_WINDOWS,
-                                index=(
-                                    PICKUP_WINDOWS.index(current_pickup_window)
-                                    if current_pickup_window in PICKUP_WINDOWS
-                                    else 0
-                                ),
-                            )
-
-                            pickup_status = st.selectbox(
-                                "Pickup Status",
-                                PICKUP_STATUSES,
-                                index=(
-                                    PICKUP_STATUSES.index(current_pickup_status)
-                                    if current_pickup_status in PICKUP_STATUSES
-                                    else 0
-                                ),
-                            )
-
-                            updated_pickup_area = st.selectbox(
-                                "Confirmed Pickup Area",
-                                pickup_area_options,
-                                index=(
-                                    pickup_area_options.index(selected_pickup_area)
-                                    if selected_pickup_area in pickup_area_options
-                                    else 0
-                                ),
-                            )
-
-                        with update_col2:
-                            driver_options = get_driver_options(drivers)
-
-                            assigned_driver = st.selectbox(
-                                "Assign Driver / Staff",
-                                driver_options,
-                                index=(
-                                    driver_options.index(current_assigned_driver)
-                                    if current_assigned_driver in driver_options
-                                    else 0
-                                ),
-                            )
-
-                            custom_driver = ""
-
-                            if assigned_driver == "Other":
-                                custom_driver = st.text_input("Enter Driver / Staff Name")
-
-                            driver_status = st.selectbox(
-                                "Driver Status",
-                                [
-                                    "Not Assigned",
-                                    "Assigned",
-                                    "On the Way",
-                                    "Arrived",
-                                    "Picked Up",
-                                    "Delayed",
-                                    "Completed",
-                                ],
-                                index=0,
-                            )
-
-                            customer_notified = st.checkbox("Customer Notified")
-
-                            mark_completed = st.checkbox("Mark Pickup Completed")
-
-                        internal_notes = st.text_area(
-                            "Internal Pickup Notes",
-                            placeholder="Add staff notes about pickup confirmation, driver assignment, customer contact, route capacity, or completion details.",
-                            height=120,
-                        )
-
-                        update_submitted = st.form_submit_button(
-                            "Save Pickup Update",
-                            use_container_width=True,
-                        )
-
-                    if update_submitted:
-                        final_driver = (
-                            custom_driver.strip()
-                            if assigned_driver == "Other"
-                            else assigned_driver
-                        )
-
-                        final_status = "Completed" if mark_completed else pickup_status
-
-                        update_id = generate_update_id("PU-UPD")
-
-                        update_record = {
-                            "update_id": update_id,
-                            "pickup_id": pickup_id,
-                            "shipment_id": shipment_id,
-                            "customer_name": customer_name,
-                            "update_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            "updated_by_role": role_label,
-                            "pickup_area": updated_pickup_area,
-                            "confirmed_pickup_date": str(confirmed_pickup_date),
-                            "confirmed_pickup_window": confirmed_pickup_window,
-                            "assigned_driver": final_driver,
-                            "pickup_status": final_status,
-                            "driver_status": driver_status,
-                            "customer_notified": customer_notified,
-                            "internal_notes": internal_notes,
-                        }
-
-                        st.session_state.pickup_updates.append(update_record)
-
-                        st.success(f"Pickup update saved. Update ID: {update_id}")
-
-                        st.markdown("### Saved Pickup Update")
-                        st.dataframe(pd.DataFrame([update_record]), use_container_width=True)
-
-                        st.info(
-                            "MVP note: this update is stored during the current app session. "
-                            "Later, this will update the pickup schedule table in the database."
-                        )
-
-    # ---------------------------------------------------------
-    # Capacity Board
-    # ---------------------------------------------------------
-    with top_tabs[1]:
-        render_capacity_board(pickup_capacity)
-
-    # ---------------------------------------------------------
-    # Driver Directory
-    # ---------------------------------------------------------
-    with top_tabs[2]:
-        render_driver_directory(drivers)
-
-    # ---------------------------------------------------------
-    # Customer Change Requests Review
-    # ---------------------------------------------------------
-    with top_tabs[3]:
-        st.subheader("Customer Change Requests for Review")
-
-        st.markdown(
-            """
-            Review customer requests for pickup reschedule, shipment cancellation,
-            contact updates, or other shipment changes. Staff and owner users can approve,
-            reject, or mark requests for follow-up.
-            """
-        )
-
-        pending_csv_requests = filter_pending_change_requests(change_history)
-        pending_session_requests = get_session_customer_change_requests()
-
-        pending_requests = combine_change_requests(
-            csv_change_history=pending_csv_requests,
-            session_change_requests=pending_session_requests,
-        )
-
-        if pending_requests.empty:
-            st.success("There are no pending customer change requests at this time.")
-        else:
-            display_columns = [
-                "change_id",
-                "shipment_id",
-                "customer_name",
-                "change_date",
-                "change_type",
-                "old_value",
-                "new_value",
-                "requested_by",
-                "requested_role",
-                "request_reason",
-                "approval_status",
-                "notes",
-            ]
-
-            available_display_columns = [
-                col for col in display_columns if col in pending_requests.columns
-            ]
+                ]
 
             st.dataframe(
-                pending_requests[available_display_columns],
+                filtered[
+                    [
+                        "pickup_id",
+                        "shipment_id",
+                        "customer_name",
+                        "pickup_date",
+                        "pickup_time_window",
+                        "pickup_address",
+                        "driver_name",
+                        "pickup_status",
+                        "shipment_status",
+                    ]
+                ],
                 use_container_width=True,
             )
 
-            st.markdown("### Review a Change Request")
+            if not filtered.empty:
+                selected_id = st.selectbox(
+                    "Select Pickup ID to update",
+                    filtered["pickup_id"]
+                    .dropna()
+                    .astype(str)
+                    .tolist(),
+                )
 
-            change_ids = pending_requests["change_id"].dropna().astype(str).unique().tolist()
+                record = filtered[
+                    filtered["pickup_id"]
+                    .astype(str)
+                    .eq(selected_id)
+                ].iloc[0].to_dict()
 
-            selected_change_id = st.selectbox(
-                "Select Change Request",
-                options=change_ids,
+                current_status = clean(
+                    record.get(
+                        "pickup_status"
+                    ),
+                    "Pending Confirmation",
+                )
+
+                current_window = clean(
+                    record.get(
+                        "pickup_time_window"
+                    ),
+                    "Flexible",
+                )
+
+                current_date = as_date(
+                    record.get(
+                        "pickup_date"
+                    )
+                )
+
+                current_area = pickup_area(
+                    record.get("notes")
+                )
+
+                areas = area_choices(
+                    pickups,
+                    capacity,
+                )
+
+                if current_area not in areas:
+                    areas.append(current_area)
+                    areas.sort()
+
+                (
+                    driver_ids,
+                    driver_labels,
+                ) = driver_choices(drivers)
+
+                current_driver = clean(
+                    record.get("driver_id"),
+                    "",
+                )
+
+                with st.form(
+                    "pickup_update_form"
+                ):
+                    left, right = st.columns(2)
+
+                    with left:
+                        selected_date = (
+                            st.date_input(
+                                "Confirmed Pickup Date",
+                                value=current_date,
+                            )
+                        )
+
+                        selected_window = (
+                            st.selectbox(
+                                (
+                                    "Confirmed "
+                                    "Pickup Window"
+                                ),
+                                PICKUP_WINDOWS,
+                                index=(
+                                    PICKUP_WINDOWS.index(
+                                        current_window
+                                    )
+                                    if current_window
+                                    in PICKUP_WINDOWS
+                                    else 0
+                                ),
+                            )
+                        )
+
+                        selected_area = (
+                            st.selectbox(
+                                "Pickup Area",
+                                areas,
+                                index=areas.index(
+                                    current_area
+                                ),
+                            )
+                        )
+
+                        selected_status = (
+                            st.selectbox(
+                                "Pickup Status",
+                                PICKUP_STATUSES,
+                                index=(
+                                    PICKUP_STATUSES.index(
+                                        current_status
+                                    )
+                                    if current_status
+                                    in PICKUP_STATUSES
+                                    else 0
+                                ),
+                            )
+                        )
+
+                    with right:
+                        selected_driver = (
+                            st.selectbox(
+                                "Assign Driver",
+                                driver_ids,
+                                index=(
+                                    driver_ids.index(
+                                        current_driver
+                                    )
+                                    if current_driver
+                                    in driver_ids
+                                    else 0
+                                ),
+                                format_func=(
+                                    lambda value: (
+                                        driver_labels[
+                                            value
+                                        ]
+                                    )
+                                ),
+                            )
+                        )
+
+                        dispatcher = (
+                            st.text_input(
+                                (
+                                    "Updated By / "
+                                    "Dispatcher"
+                                ),
+                                value=role,
+                            )
+                        )
+
+                        notified = st.checkbox(
+                            "Customer Notified"
+                        )
+
+                        completed = st.checkbox(
+                            "Mark Pickup Completed"
+                        )
+
+                    notes = st.text_area(
+                        "Internal Pickup Notes",
+                        height=110,
+                    )
+
+                    submitted = (
+                        st.form_submit_button(
+                            "Save Pickup Update",
+                            use_container_width=True,
+                        )
+                    )
+
+                show_capacity(
+                    capacity_record(
+                        capacity,
+                        selected_area,
+                        selected_date,
+                    )
+                )
+
+                if submitted:
+                    try:
+                        save_pickup(
+                            engine,
+                            record,
+                            selected_date,
+                            selected_window,
+                            selected_area,
+                            selected_driver,
+                            (
+                                "Completed"
+                                if completed
+                                else selected_status
+                            ),
+                            (
+                                dispatcher.strip()
+                                or role
+                            ),
+                            notified,
+                            notes,
+                        )
+
+                        st.success(
+                            "Pickup update saved "
+                            "to Neon."
+                        )
+
+                        st.rerun()
+
+                    except Exception as exc:
+                        st.error(
+                            "The pickup update "
+                            "could not be saved."
+                        )
+
+                        st.caption(
+                            "Technical details: "
+                            f"{type(exc).__name__}: "
+                            f"{safe_error(exc)}"
+                        )
+
+    with tabs[1]:
+        st.subheader(
+            "Pickup Capacity Board"
+        )
+
+        if capacity.empty:
+            st.info(
+                "No pickup-capacity records "
+                "are stored in Neon."
+            )
+        else:
+            st.dataframe(
+                capacity,
+                use_container_width=True,
             )
 
-            selected_change_df = pending_requests[
-                pending_requests["change_id"].astype(str) == selected_change_id
-            ].copy()
+    with tabs[2]:
+        st.subheader(
+            "Driver Directory"
+        )
 
-            if not selected_change_df.empty:
-                selected_change = selected_change_df.iloc[0]
+        if drivers.empty:
+            st.info(
+                "No driver records are "
+                "stored in Neon."
+            )
+        else:
+            st.dataframe(
+                drivers,
+                use_container_width=True,
+            )
 
-                review_col1, review_col2, review_col3 = st.columns(3)
+    with tabs[3]:
+        st.subheader(
+            "Customer Change Requests "
+            "for Review"
+        )
 
-                with review_col1:
-                    with st.container(border=True):
-                        st.markdown("#### Shipment ID")
-                        st.write(safe_get(selected_change, "shipment_id"))
+        if pending_changes.empty:
+            st.success(
+                "There are no pending "
+                "customer change requests."
+            )
 
-                with review_col2:
-                    with st.container(border=True):
-                        st.markdown("#### Change Type")
-                        st.write(safe_get(selected_change, "change_type"))
+        else:
+            st.dataframe(
+                pending_changes,
+                use_container_width=True,
+            )
 
-                with review_col3:
-                    with st.container(border=True):
-                        st.markdown("#### Requested By")
-                        st.write(safe_get(selected_change, "requested_by"))
+            change_id = st.selectbox(
+                "Select Change Request",
+                pending_changes["change_id"]
+                .astype(str)
+                .tolist(),
+            )
 
-                with st.form("change_request_review_form"):
-                    decision = st.selectbox(
-                        "Decision",
-                        APPROVAL_DECISIONS,
+            change = pending_changes[
+                pending_changes["change_id"]
+                .astype(str)
+                .eq(change_id)
+            ].iloc[0].to_dict()
+
+            with st.container(
+                border=True
+            ):
+                st.write(
+                    "**Shipment:** "
+                    + clean(
+                        change.get(
+                            "shipment_id"
+                        )
                     )
+                )
 
-                    reviewer_name = st.text_input(
-                        "Reviewed By",
-                        value=role_label,
+                st.write(
+                    "**Change type:** "
+                    + clean(
+                        change.get(
+                            "change_type"
+                        )
                     )
+                )
 
-                    review_notes = st.text_area(
+                st.write(
+                    "**Requested change:** "
+                    + clean(
+                        change.get(
+                            "new_value"
+                        )
+                    )
+                )
+
+            with st.form(
+                "change_review_form"
+            ):
+                decision = st.selectbox(
+                    "Decision",
+                    [
+                        "Approve",
+                        "Reject",
+                        "Needs Follow-Up",
+                    ],
+                )
+
+                reviewer = st.text_input(
+                    "Reviewed By",
+                    value=role,
+                )
+
+                review_notes = (
+                    st.text_area(
                         "Review Notes",
-                        placeholder="Add approval, rejection, follow-up, or customer communication notes.",
-                        height=120,
+                        height=110,
                     )
+                )
 
-                    review_submitted = st.form_submit_button(
+                review_submitted = (
+                    st.form_submit_button(
                         "Save Review Decision",
                         use_container_width=True,
                     )
+                )
 
-                if review_submitted:
-                    review_id = generate_update_id("REV")
-
-                    approval_status = {
-                        "Approve": "Approved",
-                        "Reject": "Rejected",
-                        "Needs Follow-Up": "Needs Follow-Up",
-                    }[decision]
-
-                    review_record = {
-                        "review_id": review_id,
-                        "change_id": selected_change_id,
-                        "shipment_id": safe_get(selected_change, "shipment_id"),
-                        "customer_name": safe_get(selected_change, "customer_name"),
-                        "change_type": safe_get(selected_change, "change_type"),
-                        "old_value": safe_get(selected_change, "old_value"),
-                        "new_value": safe_get(selected_change, "new_value"),
-                        "reviewed_by": reviewer_name,
-                        "reviewed_by_role": role_label,
-                        "review_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "approval_status": approval_status,
-                        "review_notes": review_notes,
-                    }
-
-                    st.session_state.reviewed_change_requests.append(review_record)
-
-                    st.success(f"Review decision saved. Review ID: {review_id}")
-
-                    st.markdown("### Review Summary")
-                    st.dataframe(pd.DataFrame([review_record]), use_container_width=True)
-
-                    st.info(
-                        "MVP note: this review is stored during the current app session. "
-                        "Later, this will update the shipment change history table and notify the customer."
+            if review_submitted:
+                try:
+                    saved_status = (
+                        review_change(
+                            engine,
+                            change,
+                            decision,
+                            (
+                                reviewer.strip()
+                                or role
+                            ),
+                            role,
+                            review_notes,
+                        )
                     )
 
-    # ---------------------------------------------------------
-    # Session Activity
-    # ---------------------------------------------------------
-    with top_tabs[4]:
-        st.subheader("Session Activity")
+                    st.success(
+                        "Review saved. Status: "
+                        f"{saved_status}."
+                    )
 
-        activity_tabs = st.tabs(
-            [
-                "Pickup Updates",
-                "Reviewed Change Requests",
-                "CSV Change History",
-                "Pickup Capacity Data",
-                "Drivers Data",
-            ]
-        )
+                    st.rerun()
 
-        with activity_tabs[0]:
-            pickup_updates = st.session_state.get("pickup_updates", [])
+                except Exception as exc:
+                    st.error(
+                        "The review decision "
+                        "could not be saved."
+                    )
 
-            if pickup_updates:
-                st.dataframe(pd.DataFrame(pickup_updates), use_container_width=True)
-            else:
-                st.info("No pickup updates have been saved in this session.")
-
-        with activity_tabs[1]:
-            reviewed_requests = st.session_state.get("reviewed_change_requests", [])
-
-            if reviewed_requests:
-                st.dataframe(pd.DataFrame(reviewed_requests), use_container_width=True)
-            else:
-                st.info("No change requests have been reviewed in this session.")
-
-        with activity_tabs[2]:
-            if change_history.empty:
-                st.info("No shipment change history file found.")
-            else:
-                display_history = change_history.copy()
-
-                if "change_date" in display_history.columns:
-                    display_history = display_history.sort_values("change_date", ascending=False)
-
-                st.dataframe(display_history, use_container_width=True)
-
-        with activity_tabs[3]:
-            if pickup_capacity.empty:
-                st.info("No pickup capacity data found.")
-            else:
-                st.dataframe(pickup_capacity, use_container_width=True)
-
-        with activity_tabs[4]:
-            if drivers.empty:
-                st.info("No driver data found.")
-            else:
-                st.dataframe(drivers, use_container_width=True)
+                    st.caption(
+                        "Technical details: "
+                        f"{type(exc).__name__}: "
+                        f"{safe_error(exc)}"
+                    )
 
 
 if __name__ == "__main__":
