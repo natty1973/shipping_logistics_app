@@ -8,7 +8,7 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine, text
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Engine, URL
 
 from src.styles import apply_custom_styles, hero, sidebar_shipping_options
 
@@ -71,75 +71,287 @@ PREFERRED_WINDOWS = [
 ]
 
 
-def get_configured_connection_names() -> list[str]:
+def _to_plain_mapping(value: Any) -> Any:
     """
-    Return Streamlit SQL connection names without reading or exposing credentials.
-
-    This supports any name already used elsewhere in the app, such as:
-    [connections.neon]
-    [connections.postgresql]
-    [connections.sql]
+    Convert Streamlit secrets objects into ordinary Python dictionaries/lists
+    without exposing any values on the page.
     """
 
-    discovered_names: list[str] = []
+    if hasattr(value, "items"):
+        return {
+            str(key): _to_plain_mapping(item)
+            for key, item in value.items()
+        }
 
-    try:
-        connections = st.secrets.get("connections", {})
+    if isinstance(value, (list, tuple)):
+        return [_to_plain_mapping(item) for item in value]
 
-        if connections and hasattr(connections, "keys"):
-            discovered_names.extend(str(name) for name in connections.keys())
-
-    except (FileNotFoundError, KeyError, TypeError, AttributeError):
-        pass
-
-    common_names = [
-        "neon",
-        "postgresql",
-        "postgres",
-        "sql",
-        "database",
-        "db",
-    ]
-
-    unique_names: list[str] = []
-
-    for name in [*discovered_names, *common_names]:
-        clean_name = str(name).strip()
-
-        if clean_name and clean_name not in unique_names:
-            unique_names.append(clean_name)
-
-    return unique_names
+    return value
 
 
-def get_top_level_database_url() -> str | None:
+def _walk_secret_values(
+    value: Any,
+    path: tuple[str, ...] = (),
+) -> list[tuple[tuple[str, ...], Any]]:
+    """Return every nested secret value together with its key path."""
+
+    results: list[tuple[tuple[str, ...], Any]] = []
+
+    if isinstance(value, dict):
+        for key, item in value.items():
+            results.extend(
+                _walk_secret_values(
+                    item,
+                    (*path, str(key)),
+                )
+            )
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            results.extend(
+                _walk_secret_values(
+                    item,
+                    (*path, str(index)),
+                )
+            )
+    else:
+        results.append((path, value))
+
+    return results
+
+
+def _looks_like_postgres_url(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+
+    clean_value = value.strip().lower()
+
+    return clean_value.startswith(
+        (
+            "postgresql://",
+            "postgres://",
+            "postgresql+psycopg2://",
+        )
+    )
+
+
+def _normalise_postgres_url(database_url: str) -> str:
     """
-    Fallback for projects that use a top-level DATABASE_URL instead of
-    a [connections.<name>] section.
+    SQLAlchemy prefers postgresql://. Neon may provide postgres:// in some
+    interfaces, so normalize it before creating the engine.
     """
 
-    for environment_key in ("DATABASE_URL", "NEON_DATABASE_URL"):
-        environment_value = os.getenv(environment_key, "").strip()
+    clean_url = database_url.strip()
 
-        if environment_value:
-            return environment_value
+    if clean_url.startswith("postgres://"):
+        clean_url = "postgresql://" + clean_url[len("postgres://"):]
 
-    try:
-        for secret_key in ("DATABASE_URL", "NEON_DATABASE_URL"):
-            secret_value = str(st.secrets.get(secret_key, "")).strip()
+    return clean_url
 
-            if secret_value:
-                return secret_value
 
-    except (FileNotFoundError, KeyError, TypeError, AttributeError):
-        return None
+def _secret_key_paths(secret_data: dict[str, Any]) -> list[str]:
+    """
+    Return key paths only, never secret values. This is safe diagnostic
+    information when a configuration cannot be resolved.
+    """
+
+    paths: list[str] = []
+
+    for path, _ in _walk_secret_values(secret_data):
+        if path:
+            paths.append(".".join(path))
+
+    return sorted(set(paths))
+
+
+def _find_url_in_secrets(
+    secret_data: dict[str, Any],
+) -> tuple[str, str] | None:
+    """
+    Find a PostgreSQL URL anywhere in Streamlit Secrets.
+
+    This supports:
+      DATABASE_URL = "postgresql://..."
+      NEON_DATABASE_URL = "postgresql://..."
+      [connections.neon]
+      url = "postgresql://..."
+      [database]
+      connection_string = "postgresql://..."
+      and other nested layouts.
+    """
+
+    preferred_names = {
+        "database_url",
+        "neon_database_url",
+        "postgres_url",
+        "postgresql_url",
+        "url",
+        "connection_string",
+        "connection_url",
+        "uri",
+    }
+
+    all_values = _walk_secret_values(secret_data)
+
+    # Prefer recognized key names first.
+    for path, value in all_values:
+        final_key = path[-1].lower() if path else ""
+
+        if final_key in preferred_names and _looks_like_postgres_url(value):
+            return (
+                _normalise_postgres_url(str(value)),
+                f"Streamlit secret: {'.'.join(path)}",
+            )
+
+    # Then accept any nested secret value that is clearly a PostgreSQL URL.
+    for path, value in all_values:
+        if _looks_like_postgres_url(value):
+            return (
+                _normalise_postgres_url(str(value)),
+                f"Streamlit secret: {'.'.join(path)}",
+            )
+
+    return None
+
+
+def _candidate_mappings(
+    value: Any,
+    path: tuple[str, ...] = (),
+) -> list[tuple[tuple[str, ...], dict[str, Any]]]:
+    """Return every nested dictionary as a possible connection configuration."""
+
+    candidates: list[tuple[tuple[str, ...], dict[str, Any]]] = []
+
+    if isinstance(value, dict):
+        candidates.append((path, value))
+
+        for key, item in value.items():
+            candidates.extend(
+                _candidate_mappings(
+                    item,
+                    (*path, str(key)),
+                )
+            )
+
+    return candidates
+
+
+def _mapping_value(
+    mapping: dict[str, Any],
+    names: tuple[str, ...],
+) -> Any:
+    """Read a configuration value using case-insensitive aliases."""
+
+    lower_mapping = {
+        str(key).lower(): value
+        for key, value in mapping.items()
+    }
+
+    for name in names:
+        if name.lower() in lower_mapping:
+            value = lower_mapping[name.lower()]
+
+            if value is not None and str(value).strip():
+                return value
+
+    return None
+
+
+def _find_structured_connection(
+    secret_data: dict[str, Any],
+) -> tuple[URL, str] | None:
+    """
+    Support secrets saved as individual fields rather than one URL.
+
+    Examples:
+      host, database, username, password, port
+      server, dbname, user, password
+    """
+
+    for path, mapping in _candidate_mappings(secret_data):
+        host = _mapping_value(
+            mapping,
+            (
+                "host",
+                "hostname",
+                "server",
+                "db_host",
+                "database_host",
+                "neon_host",
+            ),
+        )
+        username = _mapping_value(
+            mapping,
+            (
+                "username",
+                "user",
+                "db_user",
+                "database_user",
+                "neon_user",
+            ),
+        )
+        password = _mapping_value(
+            mapping,
+            (
+                "password",
+                "pass",
+                "db_password",
+                "database_password",
+                "neon_password",
+            ),
+        )
+        database = _mapping_value(
+            mapping,
+            (
+                "database",
+                "dbname",
+                "db_name",
+                "database_name",
+                "neon_database",
+            ),
+        )
+
+        if not all((host, username, password, database)):
+            continue
+
+        port_value = _mapping_value(
+            mapping,
+            ("port", "db_port", "database_port"),
+        )
+        sslmode = _mapping_value(
+            mapping,
+            ("sslmode", "ssl_mode"),
+        ) or "require"
+
+        try:
+            port = int(port_value) if port_value else 5432
+        except (TypeError, ValueError):
+            port = 5432
+
+        database_url = URL.create(
+            drivername="postgresql+psycopg2",
+            username=str(username).strip(),
+            password=str(password),
+            host=str(host).strip(),
+            port=port,
+            database=str(database).strip(),
+            query={"sslmode": str(sslmode).strip()},
+        )
+
+        source_path = ".".join(path) if path else "top level"
+
+        return (
+            database_url,
+            f"Structured Streamlit secrets: {source_path}",
+        )
 
     return None
 
 
 @st.cache_resource(show_spinner=False)
-def create_fallback_engine(database_url: str) -> Engine:
-    """Create a cached SQLAlchemy engine for a top-level database URL."""
+def create_database_engine(
+    database_url: str | URL,
+) -> Engine:
+    """Create and cache a resilient Neon/PostgreSQL SQLAlchemy engine."""
 
     return create_engine(
         database_url,
@@ -153,7 +365,7 @@ def create_fallback_engine(database_url: str) -> Engine:
 
 
 def test_engine(engine: Engine) -> None:
-    """Confirm that the configured connection can execute a PostgreSQL query."""
+    """Confirm the resolved connection can execute a PostgreSQL query."""
 
     with engine.connect() as database:
         database.execute(text("SELECT 1;"))
@@ -161,63 +373,72 @@ def test_engine(engine: Engine) -> None:
 
 def resolve_database_engine() -> tuple[Engine, str]:
     """
-    Reuse the same Streamlit SQL connection already configured for the app.
+    Resolve the Neon connection without assuming a specific secret key name.
 
-    The previous page tried to manually extract a URL from st.secrets. That
-    failed when the existing Streamlit connection used a different name or
-    individual connection fields. st.connection handles both URL-based and
-    field-based SQL configurations automatically.
+    The earlier version checked only a short list of Streamlit connection names
+    and discarded the underlying errors. This version searches all nested
+    Streamlit secrets, supports URL and field-based configurations, and reports
+    only secret key paths—not credentials—if it still cannot resolve them.
     """
 
-    attempted_names: list[str] = []
+    # Environment variables are useful locally and on some hosts.
+    for environment_key in (
+        "DATABASE_URL",
+        "NEON_DATABASE_URL",
+        "POSTGRES_URL",
+        "POSTGRESQL_URL",
+    ):
+        environment_value = os.getenv(environment_key, "").strip()
 
-    for connection_name in get_configured_connection_names():
-        attempted_names.append(connection_name)
-
-        try:
-            streamlit_connection = st.connection(
-                connection_name,
-                type="sql",
-            )
-
-            try:
-                test_engine(streamlit_connection.engine)
-            except Exception:
-                # Reinitialize once in case Community Cloud cached an older
-                # password before the Neon credential was changed.
-                streamlit_connection.reset()
-                streamlit_connection = st.connection(
-                    connection_name,
-                    type="sql",
-                )
-                test_engine(streamlit_connection.engine)
-
-            return (
-                streamlit_connection.engine,
-                f"Streamlit connection: {connection_name}",
-            )
-
-        except Exception:
+        if not environment_value:
             continue
 
-    database_url = get_top_level_database_url()
-
-    if database_url:
-        fallback_engine = create_fallback_engine(database_url)
-        test_engine(fallback_engine)
+        engine = create_database_engine(
+            _normalise_postgres_url(environment_value)
+        )
+        test_engine(engine)
 
         return (
-            fallback_engine,
-            "Top-level DATABASE_URL",
+            engine,
+            f"Environment variable: {environment_key}",
         )
 
-    attempted_text = ", ".join(attempted_names) or "none"
+    try:
+        secret_data = _to_plain_mapping(st.secrets)
+    except FileNotFoundError:
+        secret_data = {}
+    except Exception as exc:
+        raise RuntimeError(
+            "Streamlit could not read its secrets configuration. "
+            f"{type(exc).__name__}: {safe_error_message(exc)}"
+        ) from exc
+
+    url_result = _find_url_in_secrets(secret_data)
+
+    if url_result:
+        database_url, source = url_result
+        engine = create_database_engine(database_url)
+        test_engine(engine)
+
+        return engine, source
+
+    structured_result = _find_structured_connection(secret_data)
+
+    if structured_result:
+        database_url, source = structured_result
+        engine = create_database_engine(database_url)
+        test_engine(engine)
+
+        return engine, source
+
+    available_paths = _secret_key_paths(secret_data)
+    path_text = ", ".join(available_paths) if available_paths else "none"
 
     raise RuntimeError(
-        "No working Streamlit SQL connection was found. "
-        f"Connection names checked: {attempted_text}. "
-        "The Request Shipment page now uses the same "
-        "[connections.<name>] configuration as the rest of the app."
+        "No PostgreSQL credential was found in the secrets available to this "
+        "running app. Available secret key paths (values hidden): "
+        f"{path_text}. "
+        "A CSV file does not provide a database connection."
     )
 
 
