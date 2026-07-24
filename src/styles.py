@@ -428,10 +428,14 @@ def apply_custom_styles() -> None:
             transform: translateY(-1px);
         }
 
-        /* Small bottom-right home button */
-        div[class*="st-key-back_to_home_bar"] .stButton > button {
+        /* Small bottom-right Home page link */
+        div[class*="st-key-back_to_home_bar"] a[data-testid="stPageLink-NavLink"] {
+            display: flex !important;
+            justify-content: center !important;
+            align-items: center !important;
             background: #0B6E4F !important;
             color: #FFFFFF !important;
+            border: none !important;
             border-radius: 10px !important;
             padding: 0.48rem 0.72rem !important;
             font-size: 0.84rem !important;
@@ -439,11 +443,19 @@ def apply_custom_styles() -> None:
             min-height: 2.35rem !important;
             box-shadow: 0 6px 14px rgba(11, 110, 79, 0.18) !important;
             white-space: nowrap !important;
+            text-decoration: none !important;
         }
 
-        div[class*="st-key-back_to_home_bar"] .stButton > button:hover {
+        div[class*="st-key-back_to_home_bar"] a[data-testid="stPageLink-NavLink"]:hover {
             background: #084C38 !important;
             color: #FFFFFF !important;
+            transform: translateY(-1px);
+        }
+
+        div[class*="st-key-back_to_home_bar"] a[data-testid="stPageLink-NavLink"] p,
+        div[class*="st-key-back_to_home_bar"] a[data-testid="stPageLink-NavLink"] span {
+            color: #FFFFFF !important;
+            font-weight: 900 !important;
         }
 
         a[data-testid="stPageLink-NavLink"] {
@@ -620,7 +632,10 @@ def render_back_to_home(
     key: str = "back_to_home",
 ) -> None:
     """
-    Render a compact bottom-right button for the current portal home page.
+    Render a compact bottom-right Home link.
+
+    A page link only navigates after an explicit customer click and cannot be
+    activated by submitting another form on the page.
     """
 
     if _PORTAL_HOME_PAGE is None:
@@ -637,14 +652,12 @@ def render_back_to_home(
         with st.container(
             key=f"back_to_home_bar_{key}"
         ):
-            if st.button(
-                "🏠 Back to Home",
-                key=key,
-                use_container_width=True,
-            ):
-                st.switch_page(
-                    _PORTAL_HOME_PAGE
-                )
+            st.page_link(
+                _PORTAL_HOME_PAGE,
+                label="Back to Home",
+                icon="🏠",
+                width="stretch",
+            )
 
 def hero(title: str, subtitle: str) -> None:
     """

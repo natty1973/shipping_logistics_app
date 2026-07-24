@@ -1888,6 +1888,111 @@ def build_shipment_confirmation_pdf(
     story.append(notice_table)
     story.append(Spacer(1, 0.14 * inch))
 
+    price_summary_table = Table(
+        [
+            [
+                Paragraph(
+                    "<b>ESTIMATED STARTING PRICE</b>",
+                    section_style,
+                ),
+                Paragraph(
+                    (
+                        "<b>"
+                        f"{_pdf_safe_text(_format_usd(record.get('estimated_total_usd')))}"
+                        "</b>"
+                    ),
+                    shipment_id_style,
+                ),
+                Paragraph(
+                    (
+                        "<b>"
+                        f"{_pdf_safe_text(_format_gyd(record.get('estimated_total_gyd')))}"
+                        "</b><br/>"
+                        "<font size='7.5'>Estimated GYD equivalent</font>"
+                    ),
+                    title_style,
+                ),
+            ]
+        ],
+        colWidths=[
+            2.65 * inch,
+            2.0 * inch,
+            2.15 * inch,
+        ],
+    )
+
+    price_summary_table.setStyle(
+        TableStyle(
+            [
+                (
+                    "BACKGROUND",
+                    (0, 0),
+                    (0, 0),
+                    colors.HexColor("#0B6E4F"),
+                ),
+                (
+                    "BACKGROUND",
+                    (1, 0),
+                    (-1, 0),
+                    colors.HexColor("#E6F4EF"),
+                ),
+                (
+                    "BOX",
+                    (0, 0),
+                    (-1, -1),
+                    0.9,
+                    colors.HexColor("#0B6E4F"),
+                ),
+                (
+                    "INNERGRID",
+                    (0, 0),
+                    (-1, -1),
+                    0.5,
+                    colors.HexColor("#B8D7CB"),
+                ),
+                (
+                    "VALIGN",
+                    (0, 0),
+                    (-1, -1),
+                    "MIDDLE",
+                ),
+                (
+                    "ALIGN",
+                    (1, 0),
+                    (-1, -1),
+                    "CENTER",
+                ),
+                (
+                    "LEFTPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    9,
+                ),
+                (
+                    "RIGHTPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    9,
+                ),
+                (
+                    "TOPPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    9,
+                ),
+                (
+                    "BOTTOMPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    9,
+                ),
+            ]
+        )
+    )
+
+    story.append(price_summary_table)
+    story.append(Spacer(1, 0.14 * inch))
+
     key_information = [
         [
             _pdf_paragraph(
@@ -2625,6 +2730,9 @@ def initialize_request_storage() -> None:
     if "last_shipping_quote" not in st.session_state:
         st.session_state.last_shipping_quote = None
 
+    if "show_saved_confirmation" not in st.session_state:
+        st.session_state.show_saved_confirmation = False
+
 
 def display_confirmation(
     record: dict[str, Any],
@@ -2661,7 +2769,7 @@ def display_confirmation(
             )
         ):
             st.download_button(
-                label="Download Customer Receipt",
+                label="Download Customer Receipt — Price Included",
                 data=pdf_bytes,
                 file_name=(
                     f"{record['shipment_id']}_"
@@ -2841,6 +2949,28 @@ def main() -> None:
         "the shipment, route, weight, dimensions, pickup, delivery, customs, "
         "and carrier requirements."
     )
+
+    just_showed_confirmation = bool(
+        st.session_state.pop(
+            "show_saved_confirmation",
+            False,
+        )
+    )
+
+    if (
+        just_showed_confirmation
+        and st.session_state.last_shipment_confirmation
+    ):
+        display_confirmation(
+            st.session_state.last_shipment_confirmation,
+            key_prefix="saved_confirmation",
+            success_message=(
+                "Your shipment request was saved successfully. "
+                "The customer receipt, including the complete "
+                "price calculation, is ready below."
+            ),
+        )
+        st.divider()
 
     st.subheader("Shipment Request Form")
 
@@ -3293,9 +3423,13 @@ def main() -> None:
                     quote
                 )
 
-                display_confirmation(
-                    request_record,
-                    key_prefix="new_confirmation",
+                st.session_state.show_saved_confirmation = True
+
+                # Explicitly remain on the registered Request Shipment page.
+                # This prevents Streamlit from returning to the portal's
+                # default Home page during the post-submit rerun.
+                st.switch_page(
+                    "pages/Request_Shipment.py"
                 )
 
             except Exception as exc:
@@ -3312,6 +3446,7 @@ def main() -> None:
 
     elif (
         st.session_state.last_shipment_confirmation
+        and not just_showed_confirmation
     ):
         with st.expander(
             "View and download the most recent "
