@@ -2744,23 +2744,118 @@ def display_confirmation(
         "Your shipment request was saved successfully."
     ),
 ) -> None:
-    """Show the confirmation and provide a compact customer receipt button."""
+    """
+    Show a compact confirmation with the Shipment ID, receipt, and summary.
+
+    The Shipment ID code box is intentionally narrow so the copy icon stays
+    close to the ID. Confirmation metrics use smaller responsive typography
+    so long statuses and GYD amounts remain inside their cards.
+    """
+
+    st.markdown(
+        """
+        <style>
+        /* Compact Shipment ID copy box */
+        div[class*="st-key-shipment_id_copy_"] {
+            max-width: 245px;
+        }
+
+        div[class*="st-key-shipment_id_copy_"]
+        div[data-testid="stCodeBlock"] {
+            max-width: 245px !important;
+            width: 245px !important;
+        }
+
+        div[class*="st-key-shipment_id_copy_"] pre {
+            margin: 0 !important;
+            padding: 0.52rem 2.3rem 0.52rem 0.72rem !important;
+            min-height: 2.45rem !important;
+            white-space: nowrap !important;
+            overflow: hidden !important;
+        }
+
+        div[class*="st-key-shipment_id_copy_"] code {
+            font-size: 0.92rem !important;
+            line-height: 1.2 !important;
+            white-space: nowrap !important;
+        }
+
+        /* Smaller confirmation summary typography */
+        div[class*="st-key-confirmation_summary_"]
+        div[data-testid="stMetric"] {
+            min-height: 102px !important;
+            padding: 0.72rem 0.78rem !important;
+        }
+
+        div[class*="st-key-confirmation_summary_"]
+        div[data-testid="stMetricLabel"] p {
+            font-size: 0.76rem !important;
+            line-height: 1.12 !important;
+            font-weight: 750 !important;
+            white-space: normal !important;
+        }
+
+        div[class*="st-key-confirmation_summary_"]
+        div[data-testid="stMetricValue"] {
+            font-size: 1.08rem !important;
+            line-height: 1.18 !important;
+            white-space: normal !important;
+            overflow-wrap: anywhere !important;
+            word-break: normal !important;
+        }
+
+        div[class*="st-key-confirmation_summary_"]
+        div[data-testid="stMetricValue"] > div {
+            font-size: 1.08rem !important;
+            line-height: 1.18 !important;
+            white-space: normal !important;
+            overflow-wrap: anywhere !important;
+        }
+
+        @media screen and (max-width: 900px) {
+            div[class*="st-key-shipment_id_copy_"],
+            div[class*="st-key-shipment_id_copy_"]
+            div[data-testid="stCodeBlock"] {
+                max-width: 225px !important;
+                width: 225px !important;
+            }
+
+            div[class*="st-key-confirmation_summary_"]
+            div[data-testid="stMetricValue"],
+            div[class*="st-key-confirmation_summary_"]
+            div[data-testid="stMetricValue"] > div {
+                font-size: 0.98rem !important;
+            }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
     st.success(success_message)
 
-    heading_left, heading_right = st.columns(
-        [3.8, 1.2],
+    st.markdown("### Shipment Confirmation")
+
+    shipment_column, middle_space, receipt_column = st.columns(
+        [1.25, 3.5, 1.25],
         vertical_alignment="bottom",
     )
 
-    with heading_left:
-        st.markdown("### Your Shipment ID")
-        st.code(
-            record["shipment_id"],
-            language=None,
-        )
+    with shipment_column:
+        st.markdown("#### Shipment ID")
 
-    with heading_right:
+        with st.container(
+            key=f"shipment_id_copy_{key_prefix}"
+        ):
+            st.code(
+                record["shipment_id"],
+                language=None,
+            )
+
+    with middle_space:
+        st.write("")
+
+    with receipt_column:
         pdf_bytes = build_shipment_confirmation_pdf(
             record
         )
@@ -2772,7 +2867,7 @@ def display_confirmation(
             )
         ):
             st.download_button(
-                label="Download / Print Customer Receipt",
+                label="Download / Print Receipt",
                 data=pdf_bytes,
                 file_name=(
                     f"{record['shipment_id']}_"
@@ -2784,43 +2879,46 @@ def display_confirmation(
             )
 
     st.caption(
-        "Use the copy icon beside the Shipment ID to save it. "
-        "Download the PDF to keep or print the customer receipt."
+        "Click the copy icon inside the Shipment ID box. "
+        "Download the PDF to save or print the receipt."
     )
 
-    first, second, third, fourth = st.columns(4)
+    with st.container(
+        key=f"confirmation_summary_{key_prefix}"
+    ):
+        first, second, third, fourth = st.columns(4)
 
-    with first:
-        st.metric(
-            "Shipment Status",
-            _confirmation_value(
-                record.get("request_status")
-            ),
-        )
+        with first:
+            st.metric(
+                "Shipment Status",
+                _confirmation_value(
+                    record.get("request_status")
+                ),
+            )
 
-    with second:
-        st.metric(
-            "Pickup Status",
-            _confirmation_value(
-                record.get("pickup_status")
-            ),
-        )
+        with second:
+            st.metric(
+                "Pickup Status",
+                _confirmation_value(
+                    record.get("pickup_status")
+                ),
+            )
 
-    with third:
-        st.metric(
-            "Estimated Total (USD)",
-            _format_usd(
-                record.get("estimated_total_usd")
-            ),
-        )
+        with third:
+            st.metric(
+                "Estimated Total (USD)",
+                _format_usd(
+                    record.get("estimated_total_usd")
+                ),
+            )
 
-    with fourth:
-        st.metric(
-            "Estimated Equivalent (GYD)",
-            _format_gyd(
-                record.get("estimated_total_gyd")
-            ),
-        )
+        with fourth:
+            st.metric(
+                "Estimated Equivalent (GYD)",
+                _format_gyd(
+                    record.get("estimated_total_gyd")
+                ),
+            )
 
     st.info(
         "The price shown is a placeholder starting estimate. "
