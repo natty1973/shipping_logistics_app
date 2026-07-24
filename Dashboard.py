@@ -14,6 +14,7 @@ from src.metrics import (
 )
 from src.styles import (
     apply_custom_styles,
+    configure_portal_home_page,
     hero,
     operations_pathway,
     sidebar_shipping_options,
@@ -746,6 +747,9 @@ ai_assistant = st.Page(
 # ---------------------------------------------------------
 # Navigation
 # ---------------------------------------------------------
+# Reset the callable Home-page reference on every app rerun.
+configure_portal_home_page(None)
+
 if st.session_state.portal_mode is None:
     navigation = st.navigation(
         [
@@ -783,6 +787,7 @@ elif st.session_state.portal_mode == "owner_login":
     )
 
 elif st.session_state.portal_mode == "customer":
+    configure_portal_home_page(customer_home)
     render_back_to_portal_button()
 
     navigation = st.navigation(
@@ -797,6 +802,7 @@ elif st.session_state.portal_mode == "customer":
     )
 
 elif st.session_state.portal_mode == "staff" and st.session_state.staff_authenticated:
+    configure_portal_home_page(staff_home)
     render_back_to_portal_button()
 
     navigation = st.navigation(
@@ -811,6 +817,7 @@ elif st.session_state.portal_mode == "staff" and st.session_state.staff_authenti
     )
 
 elif st.session_state.portal_mode == "owner" and st.session_state.owner_authenticated:
+    configure_portal_home_page(owner_command_center)
     render_back_to_portal_button()
 
     navigation = st.navigation(
