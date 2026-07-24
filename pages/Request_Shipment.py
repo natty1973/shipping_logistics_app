@@ -70,11 +70,21 @@ DESTINATION_COUNTRIES = [
 ]
 
 PREFERRED_WINDOWS = [
-    "Morning",
-    "Afternoon",
-    "Evening",
-    "Flexible",
+    "8:00 AM – 10:00 AM",
+    "10:00 AM – 12:00 PM",
+    "12:00 PM – 2:00 PM",
+    "2:00 PM – 4:00 PM",
+    "4:00 PM – 6:00 PM",
 ]
+
+CLOSED_PICKUP_STATUSES = {
+    "cancelled",
+    "completed",
+    "picked up",
+    "no show",
+}
+
+DEFAULT_SLOT_CAPACITY = 1
 
 # ------------------------------------------------------------------
 # PLACEHOLDER STARTING RATES
@@ -102,11 +112,16 @@ DELIVERY_METHODS = [
 
 PICKUP_FEE_USD = {
     "Warehouse Drop-Off — Orange, NJ": 0.00,
-    "New Jersey — Orange / Newark": 20.00,
-    "New Jersey — Jersey City / Secaucus / Bayonne": 25.00,
+    "New Jersey — Orange": 20.00,
+    "New Jersey — Newark": 20.00,
+    "New Jersey — Jersey City": 25.00,
+    "New Jersey — Secaucus": 25.00,
+    "New Jersey — Bayonne": 25.00,
     "New Jersey — Central NJ / Raritan": 40.00,
-    "New York — Queens / Brooklyn": 35.00,
-    "New York — Bronx / Manhattan": 45.00,
+    "New York — Queens": 35.00,
+    "New York — Brooklyn": 35.00,
+    "New York — Bronx": 45.00,
+    "New York — Manhattan": 45.00,
     "New York — Staten Island": 45.00,
     "New York — Long Island": 60.00,
     "Other": 75.00,
@@ -1115,6 +1130,25 @@ def save_shipment_request(data: dict[str, Any]) -> dict[str, Any]:
     """Save the complete request in one Neon transaction."""
 
     engine, connection_source = resolve_database_engine()
+
+    (
+        available_slots,
+        _,
+        _,
+    ) = load_available_pickup_slots(
+        data["pickup_area"],
+        data["preferred_pickup_date"],
+    )
+
+    if (
+        data["preferred_pickup_window"]
+        not in available_slots
+    ):
+        raise RuntimeError(
+            "That pickup window is no longer available. "
+            "Choose another available two-hour window "
+            "and calculate the estimate again."
+        )
 
     with engine.begin() as database:
         verify_required_tables(database)
@@ -3017,6 +3051,366 @@ def render_confirmation_retrieval() -> None:
         )
 
 
+
+def _normalise_area_text(value: Any) -> str:
+    """Normalise an area label for driver and pickup-capacity matching."""
+
+    text_value = str(value or "").lower()
+
+    replacements = {
+        "—": " ",
+        "–": " ",
+        "/": " ",
+        ",": " ",
+        "-": " ",
+    }
+
+    for original, replacement in replacements.items():
+        text_value = text_value.replace(
+            original,
+            replacement,
+        )
+
+    return " ".join(
+        text_value.split()
+    )
+
+
+def _area_keywords(area: str) -> set[str]:
+    """Return useful matching tokens for a Solomon pickup zone."""
+
+    normalised = _normalise_area_text(area)
+
+    keyword_groups = {
+        "warehouse drop off orange nj": {
+            "orange",
+        },
+        "new jersey orange": {
+            "orange",
+        },
+        "new jersey newark": {
+            "newark",
+        },
+        "new jersey jersey city": {
+            "jersey city",
+        },
+        "new jersey secaucus": {
+            "secaucus",
+        },
+        "new jersey bayonne": {
+            "bayonne",
+        },
+        "new jersey central nj raritan": {
+            "central nj",
+            "raritan",
+        },
+        "new york queens": {
+            "queens",
+        },
+        "new york brooklyn": {
+            "brooklyn",
+        },
+        "new york bronx": {
+            "bronx",
+        },
+        "new york manhattan": {
+            "manhattan",
+        },
+        "new york staten island": {
+            "staten island",
+        },
+        "new york long island": {
+            "long island",
+        },
+        # Historical grouped labels remain readable.
+        "new york queens brooklyn": {
+            "queens",
+            "brooklyn",
+        },
+        "new york bronx manhattan": {
+            "bronx",
+            "manhattan",
+        },
+        "new jersey orange newark": {
+            "orange",
+            "newark",
+        },
+        "new jersey jersey city secaucus bayonne": {
+            "jersey city",
+            "secaucus",
+            "bayonne",
+        },
+    }
+
+    return keyword_groups.get(
+        normalised,
+        {
+            word
+            for word in normalised.split()
+            if len(word) > 2
+        },
+    )
+
+
+def _area_matches(
+    stored_value: Any,
+    selected_area: str,
+) -> bool:
+    """Match a driver/capacity/pickup area to the selected customer zone."""
+
+    stored_text = _normalise_area_text(stored_value)
+
+    if not stored_text:
+        return False
+
+    selected_text = _normalise_area_text(
+        selected_area
+    )
+
+    if (
+        selected_text in stored_text
+        or stored_text in selected_text
+    ):
+        return True
+
+    return any(
+        keyword in stored_text
+        for keyword in _area_keywords(
+            selected_area
+        )
+    )
+
+
+def _extract_pickup_area_from_notes(
+    notes: Any,
+) -> str:
+    """Read the stored Pickup area line from pickup_schedule.notes."""
+
+    match = re.search(
+        r"Pickup area:\s*([^\n\r]+)",
+        str(notes or ""),
+        re.IGNORECASE,
+    )
+
+    return (
+        match.group(1).strip()
+        if match
+        else ""
+    )
+
+
+def load_available_pickup_slots(
+    pickup_area: str,
+    selected_date: date,
+) -> tuple[list[str], dict[str, int], str]:
+    """
+    Return available two-hour pickup windows for one area and date.
+
+    Capacity is area-specific, so the same window may remain available in
+    Queens while it is full in Brooklyn when separate drivers/capacity exist.
+    Existing open pickup requests reserve a place in the selected area/window.
+    """
+
+    engine, _ = resolve_database_engine()
+
+    with engine.connect() as database:
+        drivers_table = database.execute(
+            text(
+                "SELECT TO_REGCLASS("
+                "'solomon_shipping.drivers'"
+                ");"
+            )
+        ).scalar_one_or_none()
+
+        capacity_table = database.execute(
+            text(
+                "SELECT TO_REGCLASS("
+                "'solomon_shipping.pickup_capacity'"
+                ");"
+            )
+        ).scalar_one_or_none()
+
+        active_drivers = pd.DataFrame()
+
+        if drivers_table is not None:
+            active_drivers = pd.read_sql_query(
+                text(
+                    f"""
+                    SELECT
+                        driver_id,
+                        driver_name,
+                        home_base,
+                        service_areas,
+                        primary_area,
+                        active_status
+                    FROM {DATABASE_SCHEMA}.drivers
+                    WHERE LOWER(
+                        BTRIM(
+                            COALESCE(
+                                active_status,
+                                ''
+                            )
+                        )
+                    ) IN (
+                        'active',
+                        'backup'
+                    );
+                    """
+                ),
+                database,
+            )
+
+        eligible_driver_count = 0
+
+        if not active_drivers.empty:
+            eligible_driver_count = int(
+                active_drivers.apply(
+                    lambda row: any(
+                        _area_matches(
+                            row.get(column),
+                            pickup_area,
+                        )
+                        for column in [
+                            "primary_area",
+                            "service_areas",
+                            "home_base",
+                        ]
+                    ),
+                    axis=1,
+                ).sum()
+            )
+
+        capacity_driver_count = 0
+
+        if capacity_table is not None:
+            capacity_rows = pd.read_sql_query(
+                text(
+                    f"""
+                    SELECT
+                        pickup_area,
+                        driver_count,
+                        max_pickups,
+                        available_slots,
+                        capacity_status
+                    FROM {DATABASE_SCHEMA}.pickup_capacity
+                    WHERE pickup_date = :pickup_date;
+                    """
+                ),
+                database,
+                params={
+                    "pickup_date": selected_date
+                },
+            )
+
+            if not capacity_rows.empty:
+                matching_capacity = capacity_rows[
+                    capacity_rows["pickup_area"].apply(
+                        lambda value: _area_matches(
+                            value,
+                            pickup_area,
+                        )
+                    )
+                ]
+
+                if not matching_capacity.empty:
+                    capacity_driver_count = int(
+                        pd.to_numeric(
+                            matching_capacity[
+                                "driver_count"
+                            ],
+                            errors="coerce",
+                        )
+                        .fillna(0)
+                        .max()
+                    )
+
+        slot_capacity = max(
+            eligible_driver_count,
+            capacity_driver_count,
+            DEFAULT_SLOT_CAPACITY,
+        )
+
+        existing_pickups = pd.read_sql_query(
+            text(
+                f"""
+                SELECT
+                    pickup_time_window,
+                    pickup_status,
+                    notes
+                FROM {DATABASE_SCHEMA}.pickup_schedule
+                WHERE pickup_date = :pickup_date;
+                """
+            ),
+            database,
+            params={
+                "pickup_date": selected_date
+            },
+        )
+
+    booked_by_slot = {
+        slot: 0
+        for slot in PREFERRED_WINDOWS
+    }
+
+    if not existing_pickups.empty:
+        for _, row in existing_pickups.iterrows():
+            status = str(
+                row.get("pickup_status")
+                or ""
+            ).strip().lower()
+
+            if status in CLOSED_PICKUP_STATUSES:
+                continue
+
+            stored_area = (
+                _extract_pickup_area_from_notes(
+                    row.get("notes")
+                )
+            )
+
+            if not _area_matches(
+                stored_area,
+                pickup_area,
+            ):
+                continue
+
+            slot = str(
+                row.get("pickup_time_window")
+                or ""
+            ).strip()
+
+            if slot in booked_by_slot:
+                booked_by_slot[slot] += 1
+
+    remaining_by_slot = {
+        slot: max(
+            slot_capacity
+            - booked_by_slot.get(slot, 0),
+            0,
+        )
+        for slot in PREFERRED_WINDOWS
+    }
+
+    available_slots = [
+        slot
+        for slot in PREFERRED_WINDOWS
+        if remaining_by_slot[slot] > 0
+    ]
+
+    source_note = (
+        f"Area capacity: {slot_capacity} pickup"
+        f"{'s' if slot_capacity != 1 else ''} "
+        "per two-hour window."
+    )
+
+    return (
+        available_slots,
+        remaining_by_slot,
+        source_note,
+    )
+
+
+
 def main() -> None:
     apply_custom_styles()
     sidebar_shipping_options()
@@ -3053,9 +3447,8 @@ def main() -> None:
 
     st.subheader("Shipment Request Form")
 
-    with st.form(
-        "shipment_request_form",
-        clear_on_submit=False,
+    with st.container(
+        border=True,
     ):
         st.markdown("### Customer Information")
         customer_col1, customer_col2 = st.columns(2)
@@ -3103,8 +3496,8 @@ def main() -> None:
             "### Preferred U.S. Pickup Information"
         )
         st.caption(
-            "Staff will confirm the official two-hour pickup window "
-            "after checking route and driver capacity."
+            "Choose an available two-hour window. Availability is checked "
+            "by pickup area, date, existing requests, and configured drivers."
         )
 
         pickup_col1, pickup_col2 = st.columns(2)
@@ -3128,20 +3521,87 @@ def main() -> None:
             pickup_area = st.selectbox(
                 "U.S. Pickup Zone",
                 PICKUP_AREAS,
+                key="live_pickup_area",
             )
+
             preferred_pickup_date = st.date_input(
                 "Preferred Pickup Date",
                 value=date.today(),
                 min_value=date.today(),
+                key="live_pickup_date",
             )
-            preferred_pickup_window = st.selectbox(
-                "Preferred Pickup Window",
-                PREFERRED_WINDOWS,
-            )
+
+            try:
+                (
+                    available_pickup_slots,
+                    remaining_by_slot,
+                    availability_note,
+                ) = load_available_pickup_slots(
+                    pickup_area,
+                    preferred_pickup_date,
+                )
+
+                st.caption(
+                    availability_note
+                )
+
+            except Exception as availability_error:
+                available_pickup_slots = (
+                    PREFERRED_WINDOWS.copy()
+                )
+
+                remaining_by_slot = {
+                    slot: DEFAULT_SLOT_CAPACITY
+                    for slot in PREFERRED_WINDOWS
+                }
+
+                st.warning(
+                    "Live capacity could not be checked. "
+                    "The selected time will remain a request "
+                    "until staff confirms it."
+                )
+
+                st.caption(
+                    "Technical details: "
+                    f"{type(availability_error).__name__}: "
+                    f"{safe_error_message(availability_error)}"
+                )
+
+            if available_pickup_slots:
+                preferred_pickup_window = (
+                    st.selectbox(
+                        "Available Two-Hour Pickup Window",
+                        available_pickup_slots,
+                        format_func=(
+                            lambda slot: (
+                                f"{slot} "
+                                f"({remaining_by_slot.get(slot, 0)} "
+                                f"place"
+                                f"{'s' if remaining_by_slot.get(slot, 0) != 1 else ''} "
+                                "available)"
+                            )
+                        ),
+                        key="live_pickup_window",
+                    )
+                )
+
+                st.success(
+                    "This window is currently available "
+                    "for the selected area."
+                )
+
+            else:
+                preferred_pickup_window = ""
+
+                st.error(
+                    "No pickup windows remain for this area "
+                    "on the selected date. Choose another date."
+                )
+
             pickup_flexibility = st.selectbox(
                 (
-                    "If this time is unavailable, "
-                    "can we offer another window?"
+                    "If the selected time changes before confirmation, "
+                    "may staff offer another window?"
                 ),
                 [
                     "Yes, any available time that day",
@@ -3290,12 +3750,16 @@ def main() -> None:
         )
 
         with calculate_center:
-            calculate_submitted = (
-                st.form_submit_button(
-                    "Calculate Approximate Cost",
-                    use_container_width=True,
-                    type="primary",
-                )
+            calculate_submitted = st.button(
+                "Calculate Approximate Cost",
+                key="calculate_approximate_cost",
+                use_container_width=True,
+                type="primary",
+                disabled=(
+                    not bool(
+                        preferred_pickup_window
+                    )
+                ),
             )
 
     if calculate_submitted:
