@@ -2733,6 +2733,9 @@ def initialize_request_storage() -> None:
     if "show_saved_confirmation" not in st.session_state:
         st.session_state.show_saved_confirmation = False
 
+    if "pending_shipment_request" not in st.session_state:
+        st.session_state.pending_shipment_request = None
+
 
 def display_confirmation(
     record: dict[str, Any],
@@ -2769,7 +2772,7 @@ def display_confirmation(
             )
         ):
             st.download_button(
-                label="Download Customer Receipt — Price Included",
+                label="Download / Print Customer Receipt",
                 data=pdf_bytes,
                 file_name=(
                     f"{record['shipment_id']}_"
@@ -2781,8 +2784,8 @@ def display_confirmation(
             )
 
     st.caption(
-        "Keep the Shipment ID and receipt for tracking, "
-        "payment lookup, shipment changes, and support."
+        "Use the copy icon beside the Shipment ID to save it. "
+        "Download the PDF to keep or print the customer receipt."
     )
 
     first, second, third, fourth = st.columns(4)
@@ -2949,28 +2952,6 @@ def main() -> None:
         "the shipment, route, weight, dimensions, pickup, delivery, customs, "
         "and carrier requirements."
     )
-
-    just_showed_confirmation = bool(
-        st.session_state.pop(
-            "show_saved_confirmation",
-            False,
-        )
-    )
-
-    if (
-        just_showed_confirmation
-        and st.session_state.last_shipment_confirmation
-    ):
-        display_confirmation(
-            st.session_state.last_shipment_confirmation,
-            key_prefix="saved_confirmation",
-            success_message=(
-                "Your shipment request was saved successfully. "
-                "The customer receipt, including the complete "
-                "price calculation, is ready below."
-            ),
-        )
-        st.divider()
 
     st.subheader("Shipment Request Form")
 
@@ -3201,269 +3182,284 @@ def main() -> None:
             height=75,
         )
 
-        estimate_acknowledgement = st.checkbox(
-            (
-                "I understand that the displayed amount is a "
-                "starting estimate and not the final invoice."
-            )
+        st.caption(
+            "Calculate the approximate cost first. "
+            "The final Submit button will appear below the estimate."
         )
 
-        button_left, button_right = st.columns(
-            [1, 1]
+        calculate_left, calculate_center, calculate_right = (
+            st.columns([2.15, 1.7, 2.15])
         )
 
-        with button_left:
+        with calculate_center:
             calculate_submitted = (
                 st.form_submit_button(
-                    "Calculate Starting Price",
-                    use_container_width=True,
-                )
-            )
-
-        with button_right:
-            submitted = (
-                st.form_submit_button(
-                    "Submit Shipment Request",
+                    "Calculate Approximate Cost",
                     use_container_width=True,
                     type="primary",
                 )
             )
 
-    quote = calculate_estimated_quote(
-        shipping_option=shipping_option,
-        item_type=item_type,
-        quantity=int(quantity),
-        estimated_weight_lbs=(
-            float(estimated_weight_lbs)
-        ),
-        pickup_area=pickup_area,
-        destination_country=(
-            destination_country
-        ),
-        destination_zone=(
-            destination_zone
-        ),
-        delivery_method=delivery_method,
-        special_handling=(
-            special_handling
-        ),
-        declared_value_usd=(
-            float(declared_value_usd)
-        ),
-    )
-
     if calculate_submitted:
-        st.session_state.last_shipping_quote = (
-            quote
-        )
-        render_quote_estimate(quote)
-
-    if submitted:
-        required_fields = {
-            "Full Name": customer_name,
-            "Phone Number": phone,
-            "Pickup Address": pickup_address,
-            "Pickup City": pickup_city,
-            "Pickup State": pickup_state,
-            "Destination City": destination_city,
-            "Recipient Name": recipient_name,
-            "Recipient Phone Number": (
-                recipient_phone
+        quote = calculate_estimated_quote(
+            shipping_option=shipping_option,
+            item_type=item_type,
+            quantity=int(quantity),
+            estimated_weight_lbs=(
+                float(estimated_weight_lbs)
             ),
+            pickup_area=pickup_area,
+            destination_country=(
+                destination_country
+            ),
+            destination_zone=(
+                destination_zone
+            ),
+            delivery_method=delivery_method,
+            special_handling=(
+                special_handling
+            ),
+            declared_value_usd=(
+                float(declared_value_usd)
+            ),
+        )
+
+        estimated_weight_text = (
+            f"{float(estimated_weight_lbs):,.1f} lb"
+            if estimated_weight_lbs > 0
+            else (
+                f"Assumed "
+                f"{quote['billable_weight_lbs']:,.1f} lb "
+                "for estimate"
+            )
+        )
+
+        declared_value_text = (
+            f"US${float(declared_value_usd):,.2f}"
+            if declared_value_usd > 0
+            else ""
+        )
+
+        st.session_state.pending_shipment_request = {
+            "entered_from_portal": portal_label,
+            "requested_by": (
+                requested_by.strip()
+                or portal_label
+            ),
+            "customer_name": customer_name.strip(),
+            "phone": phone.strip(),
+            "email": email.strip(),
+            "customer_type": customer_type,
+            "preferred_contact": preferred_contact,
+            "pickup_address": pickup_address.strip(),
+            "pickup_city": pickup_city.strip(),
+            "pickup_state": pickup_state.strip(),
+            "pickup_zip": pickup_zip.strip(),
+            "pickup_area": pickup_area,
+            "preferred_pickup_date": (
+                preferred_pickup_date
+            ),
+            "preferred_pickup_window": (
+                preferred_pickup_window
+            ),
+            "pickup_flexibility": (
+                pickup_flexibility
+            ),
+            "pickup_notes": pickup_notes.strip(),
+            "destination_country": (
+                destination_country
+            ),
+            "destination_city": (
+                destination_city.strip()
+            ),
+            "destination_zone": destination_zone,
+            "delivery_method": delivery_method,
+            "recipient_name": recipient_name.strip(),
+            "recipient_phone": (
+                recipient_phone.strip()
+            ),
+            "item_type": item_type,
+            "quantity": int(quantity),
+            "estimated_weight": estimated_weight_text,
+            "shipping_option": shipping_option,
+            "declared_value": declared_value_text,
+            "special_handling": (
+                ", ".join(special_handling)
+            ),
+            "shipment_notes": shipment_notes.strip(),
+            "payment_terms": payment_terms,
+            "payment_notes": payment_notes.strip(),
+            **quote,
         }
 
-        missing_fields = [
-            label
-            for label, value
-            in required_fields.items()
-            if not str(value).strip()
-        ]
+        st.session_state.last_shipping_quote = quote
+        st.session_state.last_shipment_confirmation = None
+        st.session_state[
+            "estimate_acknowledgement_bottom"
+        ] = False
 
-        if missing_fields:
-            st.error(
-                "Please complete these required fields: "
-                + ", ".join(missing_fields)
-                + "."
+    pending_request = (
+        st.session_state.pending_shipment_request
+    )
+
+    if pending_request:
+        st.divider()
+
+        render_quote_estimate(
+            pending_request
+        )
+
+        with st.container(
+            border=True
+        ):
+            st.markdown(
+                "### Review and Submit Shipment Request"
             )
 
-        elif not estimate_acknowledgement:
-            st.error(
-                "Please acknowledge that this is "
-                "a starting estimate before submitting."
+            st.write(
+                "Review the approximate cost above. "
+                "If you change any information in the form, "
+                "press **Calculate Approximate Cost** again "
+                "before submitting."
             )
 
-        else:
-            estimated_weight_text = (
-                f"{float(estimated_weight_lbs):,.1f} lb"
-                if estimated_weight_lbs > 0
-                else (
-                    f"Assumed "
-                    f"{quote['billable_weight_lbs']:,.1f} lb "
-                    "for estimate"
+            estimate_acknowledgement = st.checkbox(
+                (
+                    "I understand that this is a starting "
+                    "estimate and not the final invoice."
+                ),
+                key=(
+                    "estimate_acknowledgement_bottom"
+                ),
+            )
+
+            submit_left, submit_center, submit_right = (
+                st.columns([2.25, 1.5, 2.25])
+            )
+
+            with submit_center:
+                submitted = st.button(
+                    "Submit Shipment Request",
+                    key=(
+                        "submit_priced_shipment_request"
+                    ),
+                    type="primary",
+                    use_container_width=True,
+                    disabled=(
+                        not estimate_acknowledgement
+                    ),
                 )
-            )
 
-            declared_value_text = (
-                f"US${float(declared_value_usd):,.2f}"
-                if declared_value_usd > 0
-                else ""
-            )
-
-            form_data = {
-                "entered_from_portal": (
-                    portal_label
+        if submitted:
+            required_fields = {
+                "Full Name": pending_request[
+                    "customer_name"
+                ],
+                "Phone Number": pending_request[
+                    "phone"
+                ],
+                "Pickup Address": pending_request[
+                    "pickup_address"
+                ],
+                "Pickup City": pending_request[
+                    "pickup_city"
+                ],
+                "Pickup State": pending_request[
+                    "pickup_state"
+                ],
+                "Destination City": pending_request[
+                    "destination_city"
+                ],
+                "Recipient Name": pending_request[
+                    "recipient_name"
+                ],
+                "Recipient Phone Number": (
+                    pending_request[
+                        "recipient_phone"
+                    ]
                 ),
-                "requested_by": (
-                    requested_by.strip()
-                    or portal_label
-                ),
-                "customer_name": (
-                    customer_name.strip()
-                ),
-                "phone": phone.strip(),
-                "email": email.strip(),
-                "customer_type": customer_type,
-                "preferred_contact": (
-                    preferred_contact
-                ),
-                "pickup_address": (
-                    pickup_address.strip()
-                ),
-                "pickup_city": (
-                    pickup_city.strip()
-                ),
-                "pickup_state": (
-                    pickup_state.strip()
-                ),
-                "pickup_zip": (
-                    pickup_zip.strip()
-                ),
-                "pickup_area": pickup_area,
-                "preferred_pickup_date": (
-                    preferred_pickup_date
-                ),
-                "preferred_pickup_window": (
-                    preferred_pickup_window
-                ),
-                "pickup_flexibility": (
-                    pickup_flexibility
-                ),
-                "pickup_notes": (
-                    pickup_notes.strip()
-                ),
-                "destination_country": (
-                    destination_country
-                ),
-                "destination_city": (
-                    destination_city.strip()
-                ),
-                "destination_zone": (
-                    destination_zone
-                ),
-                "delivery_method": (
-                    delivery_method
-                ),
-                "recipient_name": (
-                    recipient_name.strip()
-                ),
-                "recipient_phone": (
-                    recipient_phone.strip()
-                ),
-                "item_type": item_type,
-                "quantity": int(quantity),
-                "estimated_weight": (
-                    estimated_weight_text
-                ),
-                "shipping_option": (
-                    shipping_option
-                ),
-                "declared_value": (
-                    declared_value_text
-                ),
-                "special_handling": (
-                    ", ".join(
-                        special_handling
-                    )
-                ),
-                "shipment_notes": (
-                    shipment_notes.strip()
-                ),
-                "payment_terms": payment_terms,
-                "payment_notes": (
-                    payment_notes.strip()
-                ),
-                **quote,
             }
 
-            try:
-                render_quote_estimate(quote)
+            missing_fields = [
+                label
+                for label, value
+                in required_fields.items()
+                if not str(value).strip()
+            ]
 
-                with st.spinner(
-                    "Saving the shipment request "
-                    "and generating the Shipment ID..."
-                ):
-                    database_result = (
-                        save_shipment_request(
-                            form_data
+            if missing_fields:
+                st.error(
+                    "Please complete these required fields "
+                    "and calculate the approximate cost again: "
+                    + ", ".join(missing_fields)
+                    + "."
+                )
+
+            else:
+                try:
+                    with st.spinner(
+                        "Saving the shipment request "
+                        "and generating the Shipment ID..."
+                    ):
+                        database_result = (
+                            save_shipment_request(
+                                pending_request
+                            )
                         )
+
+                    request_record = {
+                        **database_result,
+                        **pending_request,
+                    }
+
+                    st.session_state.shipment_request_records.append(
+                        request_record
                     )
 
-                request_record = {
-                    **database_result,
-                    **form_data,
-                }
+                    st.session_state.last_shipment_confirmation = (
+                        request_record
+                    )
 
-                st.session_state.shipment_request_records.append(
-                    request_record
-                )
-                st.session_state.last_shipment_confirmation = (
-                    request_record
-                )
-                st.session_state.last_shipping_quote = (
-                    quote
-                )
+                    st.session_state.pending_shipment_request = (
+                        None
+                    )
 
-                st.session_state.show_saved_confirmation = True
+                    st.session_state.last_shipping_quote = (
+                        None
+                    )
 
-                # Explicitly remain on the registered Request Shipment page.
-                # This prevents Streamlit from returning to the portal's
-                # default Home page during the post-submit rerun.
-                st.switch_page(
-                    "pages/Request_Shipment.py"
-                )
+                except Exception as exc:
+                    st.session_state.last_shipment_confirmation = (
+                        None
+                    )
 
-            except Exception as exc:
-                st.session_state.last_shipment_confirmation = None
-                st.error(
-                    "The shipment request was not saved, "
-                    "so no Shipment ID was issued."
-                )
-                st.caption(
-                    "Technical details: "
-                    f"{type(exc).__name__}: "
-                    f"{safe_error_message(exc)}"
-                )
+                    st.error(
+                        "The shipment request was not saved, "
+                        "so no Shipment ID was issued."
+                    )
 
-    elif (
-        st.session_state.last_shipment_confirmation
-        and not just_showed_confirmation
-    ):
-        with st.expander(
-            "View and download the most recent "
-            "shipment confirmation"
-        ):
-            display_confirmation(
-                st.session_state[
-                    "last_shipment_confirmation"
-                ],
-                key_prefix=(
-                    "recent_confirmation"
-                ),
-                success_message=(
-                    "Your most recent shipment "
-                    "confirmation is ready."
-                ),
-            )
+                    st.caption(
+                        "Technical details: "
+                        f"{type(exc).__name__}: "
+                        f"{safe_error_message(exc)}"
+                    )
+
+    if st.session_state.last_shipment_confirmation:
+        st.divider()
+
+        st.markdown(
+            "## Shipment Request Complete"
+        )
+
+        display_confirmation(
+            st.session_state.last_shipment_confirmation,
+            key_prefix="bottom_confirmation",
+            success_message=(
+                "Your shipment request was saved successfully. "
+                "Copy the Shipment ID and download or print "
+                "the customer receipt below."
+            ),
+        )
 
     st.divider()
 
