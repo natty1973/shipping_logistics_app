@@ -1,8 +1,23 @@
 from __future__ import annotations
 
-from pathlib import Path
+from typing import Any
 
 import streamlit as st
+
+
+
+_PORTAL_HOME_PAGE: Any | None = None
+
+
+def configure_portal_home_page(page: Any | None) -> None:
+    """
+    Register the current portal's callable Streamlit home page.
+
+    Dashboard.py calls this after creating its st.Page objects.
+    """
+
+    global _PORTAL_HOME_PAGE
+    _PORTAL_HOME_PAGE = page
 
 
 def apply_custom_styles() -> None:
@@ -562,26 +577,10 @@ def apply_custom_styles() -> None:
     )
 
 
-def _home_script_path() -> str:
-    """Return the first common Streamlit entrypoint found in the repo root."""
-
-    for candidate in (
-        "app.py",
-        "Home.py",
-        "home.py",
-        "main.py",
-        "streamlit_app.py",
-    ):
-        if Path(candidate).exists():
-            return candidate
-
-    return "app.py"
-
 
 def sidebar_shipping_options() -> None:
     """
-    Render shipping options and contact information in the sidebar
-    using Streamlit-native components so raw HTML does not display.
+    Render shipping options, contact information, and a safe Home link.
     """
 
     with st.sidebar:
@@ -604,16 +603,16 @@ def sidebar_shipping_options() -> None:
 
         portal_mode = st.session_state.get("portal_mode")
 
-        if portal_mode in {
-            "customer",
-            "staff",
-            "owner",
-        }:
+        if (
+            portal_mode in {"customer", "staff", "owner"}
+            and _PORTAL_HOME_PAGE is not None
+        ):
             st.divider()
             st.page_link(
-                _home_script_path(),
+                _PORTAL_HOME_PAGE,
                 label="Back to Home",
                 icon="🏠",
+                width="stretch",
             )
 
 
@@ -621,13 +620,15 @@ def render_back_to_home(
     key: str = "back_to_home",
 ) -> None:
     """
-    Render a compact bottom-right button that returns to the
-    current portal's default home page through the app entrypoint.
+    Render a compact bottom-right button for the current portal home page.
     """
+
+    if _PORTAL_HOME_PAGE is None:
+        return
 
     st.write("")
 
-    left, right = st.columns(
+    _, right = st.columns(
         [5.4, 1.35],
         vertical_alignment="bottom",
     )
@@ -642,9 +643,8 @@ def render_back_to_home(
                 use_container_width=True,
             ):
                 st.switch_page(
-                    _home_script_path()
+                    _PORTAL_HOME_PAGE
                 )
-
 
 def hero(title: str, subtitle: str) -> None:
     """

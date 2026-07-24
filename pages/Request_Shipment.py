@@ -24,7 +24,12 @@ from reportlab.platypus import (
     TableStyle,
 )
 
-from src.styles import apply_custom_styles, hero, sidebar_shipping_options
+from src.styles import (
+    apply_custom_styles,
+    hero,
+    render_back_to_home,
+    sidebar_shipping_options,
+)
 
 
 st.set_page_config(
