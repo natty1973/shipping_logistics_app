@@ -3470,46 +3470,6 @@ def main() -> None:
     render_confirmation_retrieval()
 
     st.divider()
-    st.subheader(
-        "How the Pickup Confirmation Process Works"
-    )
-
-    process_col1, process_col2, process_col3 = (
-        st.columns(3)
-    )
-
-    with process_col1:
-        with st.container(border=True):
-            st.markdown(
-                "### 1. Calculate and Submit"
-            )
-            st.write(
-                "The customer reviews a starting "
-                "estimate, submits the request, and "
-                "receives a permanent Shipment ID."
-            )
-
-    with process_col2:
-        with st.container(border=True):
-            st.markdown(
-                "### 2. Staff Reviews"
-            )
-            st.write(
-                "Staff verifies the cargo, price, "
-                "route capacity, driver availability, "
-                "and pickup details."
-            )
-
-    with process_col3:
-        with st.container(border=True):
-            st.markdown(
-                "### 3. Final Invoice and Pickup"
-            )
-            st.write(
-                "Solomon Shipping confirms the final "
-                "price and pickup window using the "
-                "same Shipment ID."
-            )
 
     if st.session_state.shipment_request_records:
         with st.expander(
