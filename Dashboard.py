@@ -1,17 +1,15 @@
 from __future__ import annotations
 
-import streamlit as st
+import os
+import re
+from decimal import Decimal, InvalidOperation
+from typing import Any
 
-from src.data_loader import load_all_data
-from src.metrics import (
-    get_total_customers,
-    get_total_shipments,
-    get_pending_pickups,
-    get_in_transit_shipments,
-    get_delivered_shipments,
-    get_total_revenue_collected,
-    get_total_outstanding_balance,
-)
+import pandas as pd
+import streamlit as st
+from sqlalchemy import URL, create_engine, text
+from sqlalchemy.engine import Engine
+
 from src.styles import (
     apply_custom_styles,
     configure_portal_home_page,
@@ -19,7 +17,6 @@ from src.styles import (
     operations_pathway,
     sidebar_shipping_options,
 )
-from src.utils import format_currency
 
 
 st.set_page_config(
@@ -37,6 +34,559 @@ STAFF_PASSWORD = "staff2026"
 
 OWNER_USERNAME = "owner"
 OWNER_PASSWORD = "solomon2026"
+
+
+# ---------------------------------------------------------
+# Live Neon / PostgreSQL Dashboard Data
+# ---------------------------------------------------------
+DATABASE_SCHEMA = "solomon_shipping"
+
+
+def get_secret(name: str) -> str:
+    """Read a database setting from the environment or Streamlit Secrets."""
+
+    environment_value = os.getenv(name, "").strip()
+
+    if environment_value:
+        return environment_value
+
+    try:
+        secret_value = st.secrets.get(name, "")
+    except (
+        FileNotFoundError,
+        KeyError,
+        TypeError,
+        AttributeError,
+    ):
+        return ""
+
+    return str(secret_value).strip() if secret_value is not None else ""
+
+
+@st.cache_resource(show_spinner=False)
+def get_database_engine() -> Engine:
+    """Create a reusable Neon/PostgreSQL connection."""
+
+    database_url = get_secret("DATABASE_URL")
+
+    if database_url:
+        if database_url.startswith("postgres://"):
+            database_url = (
+                "postgresql://"
+                + database_url[len("postgres://"):]
+            )
+
+        database_target: str | URL = database_url
+
+    else:
+        settings = {
+            "user": get_secret("DB_USER"),
+            "password": get_secret("DB_PASSWORD"),
+            "host": get_secret("DB_HOST"),
+            "port": get_secret("DB_PORT") or "5432",
+            "database": get_secret("DB_NAME"),
+            "sslmode": get_secret("DB_SSLMODE") or "require",
+        }
+
+        missing = [
+            label
+            for key, label in {
+                "user": "DB_USER",
+                "password": "DB_PASSWORD",
+                "host": "DB_HOST",
+                "database": "DB_NAME",
+            }.items()
+            if not settings[key]
+        ]
+
+        if missing:
+            raise RuntimeError(
+                "Missing Streamlit Secrets: "
+                + ", ".join(missing)
+            )
+
+        try:
+            port = int(settings["port"])
+        except ValueError:
+            port = 5432
+
+        database_target = URL.create(
+            drivername="postgresql+psycopg2",
+            username=settings["user"],
+            password=settings["password"],
+            host=settings["host"],
+            port=port,
+            database=settings["database"],
+            query={"sslmode": settings["sslmode"]},
+        )
+
+    engine = create_engine(
+        database_target,
+        pool_pre_ping=True,
+        pool_recycle=300,
+        connect_args={
+            "connect_timeout": 15,
+            "application_name": "solomon_shipping_dashboard",
+        },
+    )
+
+    with engine.connect() as connection:
+        connection.execute(text("SELECT 1;"))
+
+    return engine
+
+
+def safe_error_message(error: Exception) -> str:
+    """Remove credentials if a database error includes them."""
+
+    message = str(error)
+
+    message = re.sub(
+        r"postgres(?:ql)?(?:\+\w+)?://[^@\s]+@",
+        "postgresql://***:***@",
+        message,
+        flags=re.IGNORECASE,
+    )
+
+    return re.sub(
+        r"password\s*=\s*[^,\s]+",
+        "password=***",
+        message,
+        flags=re.IGNORECASE,
+    )
+
+
+def to_decimal(value: Any) -> Decimal:
+    """Convert a database amount to a two-decimal Decimal."""
+
+    if value is None:
+        return Decimal("0.00")
+
+    try:
+        return Decimal(str(value)).quantize(Decimal("0.01"))
+    except (InvalidOperation, TypeError, ValueError):
+        return Decimal("0.00")
+
+
+def format_usd(value: Any) -> str:
+    """Format an owner-dashboard amount as USD."""
+
+    return f"${to_decimal(value):,.2f}"
+
+
+def verify_dashboard_tables(engine: Engine) -> None:
+    """Confirm the core operational tables exist."""
+
+    required_relations = [
+        f"{DATABASE_SCHEMA}.customers",
+        f"{DATABASE_SCHEMA}.shipments",
+        f"{DATABASE_SCHEMA}.pickup_schedule",
+    ]
+
+    missing: list[str] = []
+
+    with engine.connect() as connection:
+        for relation_name in required_relations:
+            exists = connection.execute(
+                text("SELECT TO_REGCLASS(:relation_name);"),
+                {"relation_name": relation_name},
+            ).scalar_one_or_none()
+
+            if exists is None:
+                missing.append(relation_name)
+
+    if missing:
+        raise RuntimeError(
+            "Required Neon tables are missing: "
+            + ", ".join(missing)
+        )
+
+
+def table_exists(
+    engine: Engine,
+    table_name: str,
+) -> bool:
+    """Return whether an optional dashboard table exists."""
+
+    relation_name = f"{DATABASE_SCHEMA}.{table_name}"
+
+    with engine.connect() as connection:
+        return (
+            connection.execute(
+                text("SELECT TO_REGCLASS(:relation_name);"),
+                {"relation_name": relation_name},
+            ).scalar_one_or_none()
+            is not None
+        )
+
+
+def load_request_queue(
+    engine: Engine,
+) -> pd.DataFrame:
+    """
+    Load new shipment requests and pickups that still need staff attention.
+
+    A request remains in this queue until the shipment or pickup status is
+    advanced beyond its initial pending state.
+    """
+
+    query = text(
+        f"""
+        WITH latest_pickup AS (
+            SELECT DISTINCT ON (shipment_id)
+                pickup_id,
+                shipment_id,
+                pickup_date,
+                pickup_time_window,
+                pickup_address,
+                pickup_status,
+                assigned_staff,
+                driver_id,
+                created_at,
+                updated_at
+            FROM {DATABASE_SCHEMA}.pickup_schedule
+            ORDER BY
+                shipment_id,
+                updated_at DESC NULLS LAST,
+                created_at DESC NULLS LAST
+        )
+        SELECT
+            s.shipment_id,
+            s.customer_name,
+            s.shipment_date,
+            s.origin_city,
+            s.origin_state,
+            s.destination_city,
+            s.destination_country,
+            s.service_type,
+            s.shipment_mode,
+            s.amount_charged,
+            s.current_status,
+            p.pickup_id,
+            p.pickup_date,
+            p.pickup_time_window,
+            p.pickup_address,
+            p.pickup_status,
+            p.assigned_staff,
+            p.driver_id,
+            s.created_at AS request_created_at
+        FROM {DATABASE_SCHEMA}.shipments AS s
+        LEFT JOIN latest_pickup AS p
+            ON p.shipment_id = s.shipment_id
+        WHERE
+            LOWER(BTRIM(COALESCE(s.current_status, '')))
+                = 'request received'
+            OR LOWER(BTRIM(COALESCE(p.pickup_status, '')))
+                IN (
+                    'pending',
+                    'pending confirmation',
+                    'awaiting confirmation'
+                )
+        ORDER BY
+            s.created_at DESC NULLS LAST,
+            s.shipment_date DESC NULLS LAST,
+            s.shipment_id DESC
+        LIMIT 50;
+        """
+    )
+
+    with engine.connect() as connection:
+        return pd.read_sql_query(
+            query,
+            connection,
+        )
+
+
+def load_dashboard_counts(
+    engine: Engine,
+) -> dict[str, Any]:
+    """Load live operational and owner-level totals from Neon."""
+
+    core_query = text(
+        f"""
+        SELECT
+            (
+                SELECT COUNT(*)
+                FROM {DATABASE_SCHEMA}.customers
+            ) AS total_customers,
+            (
+                SELECT COUNT(*)
+                FROM {DATABASE_SCHEMA}.shipments
+            ) AS total_shipments,
+            (
+                SELECT COUNT(*)
+                FROM {DATABASE_SCHEMA}.shipments
+                WHERE LOWER(BTRIM(COALESCE(current_status, '')))
+                    = 'request received'
+            ) AS new_requests,
+            (
+                SELECT COUNT(*)
+                FROM {DATABASE_SCHEMA}.pickup_schedule
+                WHERE LOWER(BTRIM(COALESCE(pickup_status, '')))
+                    IN (
+                        'pending',
+                        'pending confirmation',
+                        'awaiting confirmation'
+                    )
+            ) AS pending_pickups,
+            (
+                SELECT COUNT(*)
+                FROM {DATABASE_SCHEMA}.pickup_schedule
+                WHERE LOWER(BTRIM(COALESCE(pickup_status, '')))
+                    IN (
+                        'pending',
+                        'pending confirmation',
+                        'awaiting confirmation'
+                    )
+                  AND NULLIF(BTRIM(COALESCE(driver_id, '')), '')
+                      IS NULL
+            ) AS unassigned_pickups,
+            (
+                SELECT COUNT(*)
+                FROM {DATABASE_SCHEMA}.shipments
+                WHERE LOWER(BTRIM(COALESCE(current_status, '')))
+                    LIKE '%in transit%'
+            ) AS in_transit,
+            (
+                SELECT COUNT(*)
+                FROM {DATABASE_SCHEMA}.shipments
+                WHERE LOWER(BTRIM(COALESCE(current_status, '')))
+                    LIKE '%delivered%'
+            ) AS delivered;
+        """
+    )
+
+    with engine.connect() as connection:
+        result = connection.execute(
+            core_query
+        ).mappings().one()
+
+    counts: dict[str, Any] = dict(result)
+    counts["revenue_collected"] = Decimal("0.00")
+    counts["outstanding_balance"] = Decimal("0.00")
+
+    if table_exists(engine, "payments"):
+        with engine.connect() as connection:
+            counts["revenue_collected"] = (
+                connection.execute(
+                    text(
+                        f"""
+                        SELECT COALESCE(
+                            SUM(amount_paid),
+                            0
+                        )
+                        FROM {DATABASE_SCHEMA}.payments;
+                        """
+                    )
+                ).scalar_one()
+            )
+
+    if table_exists(engine, "branch_payments"):
+        with engine.connect() as connection:
+            counts["outstanding_balance"] = (
+                connection.execute(
+                    text(
+                        f"""
+                        WITH latest_accounts AS (
+                            SELECT DISTINCT ON (shipment_id)
+                                shipment_id,
+                                balance_due
+                            FROM {DATABASE_SCHEMA}.branch_payments
+                            ORDER BY
+                                shipment_id,
+                                updated_at DESC NULLS LAST,
+                                created_at DESC NULLS LAST
+                        )
+                        SELECT COALESCE(
+                            SUM(balance_due),
+                            0
+                        )
+                        FROM latest_accounts;
+                        """
+                    )
+                ).scalar_one()
+            )
+
+    return counts
+
+
+def prepare_request_queue_display(
+    request_queue: pd.DataFrame,
+) -> pd.DataFrame:
+    """Create a clean staff/owner view of the pending request queue."""
+
+    if request_queue.empty:
+        return pd.DataFrame()
+
+    display = request_queue.copy()
+
+    display["route"] = (
+        display["origin_city"].fillna("")
+        + ", "
+        + display["origin_state"].fillna("")
+        + " → "
+        + display["destination_city"].fillna("")
+        + ", "
+        + display["destination_country"].fillna("")
+    )
+
+    display["assigned_driver"] = (
+        display["driver_id"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .replace("", "Not Assigned")
+    )
+
+    display["estimated_price"] = display[
+        "amount_charged"
+    ].apply(format_usd)
+
+    for date_column in [
+        "shipment_date",
+        "pickup_date",
+        "request_created_at",
+    ]:
+        if date_column in display.columns:
+            display[date_column] = pd.to_datetime(
+                display[date_column],
+                errors="coerce",
+            ).dt.strftime("%b %d, %Y")
+
+    display_columns = [
+        "shipment_id",
+        "customer_name",
+        "route",
+        "service_type",
+        "pickup_date",
+        "pickup_time_window",
+        "estimated_price",
+        "current_status",
+        "pickup_status",
+        "assigned_driver",
+    ]
+
+    available_columns = [
+        column
+        for column in display_columns
+        if column in display.columns
+    ]
+
+    return display[available_columns].rename(
+        columns={
+            "shipment_id": "Shipment ID",
+            "customer_name": "Customer",
+            "route": "Route",
+            "service_type": "Service",
+            "pickup_date": "Preferred Pickup",
+            "pickup_time_window": "Preferred Window",
+            "estimated_price": "Estimate",
+            "current_status": "Shipment Status",
+            "pickup_status": "Pickup Status",
+            "assigned_driver": "Driver",
+        }
+    )
+
+
+def render_new_request_queue(
+    engine: Engine,
+    heading: str,
+    show_owner_note: bool = False,
+) -> None:
+    """Render the live new-request alert and queue."""
+
+    request_queue = load_request_queue(engine)
+    counts = load_dashboard_counts(engine)
+
+    st.subheader(heading)
+
+    metric_columns = st.columns(3)
+
+    with metric_columns[0]:
+        st.metric(
+            "New Shipment Requests",
+            int(counts["new_requests"]),
+        )
+
+    with metric_columns[1]:
+        st.metric(
+            "Pickups Awaiting Confirmation",
+            int(counts["pending_pickups"]),
+        )
+
+    with metric_columns[2]:
+        st.metric(
+            "Pickups Without a Driver",
+            int(counts["unassigned_pickups"]),
+        )
+
+    if request_queue.empty:
+        st.success(
+            "There are no new shipment requests "
+            "or pending pickup confirmations."
+        )
+        return
+
+    new_request_count = int(
+        counts["new_requests"]
+    )
+
+    if new_request_count > 0:
+        st.warning(
+            f"{new_request_count} new shipment request"
+            f"{'s' if new_request_count != 1 else ''} "
+            "need review."
+        )
+    else:
+        st.info(
+            "There are pending pickup records "
+            "that still need attention."
+        )
+
+    display = prepare_request_queue_display(
+        request_queue
+    )
+
+    st.dataframe(
+        display,
+        use_container_width=True,
+        hide_index=True,
+        height=min(
+            520,
+            78 + (len(display) * 35),
+        ),
+    )
+
+    action_left, action_middle, action_right = (
+        st.columns([1.35, 3.3, 1.35])
+    )
+
+    with action_left:
+        st.page_link(
+            "pages/Schedule_Pickup.py",
+            label="Review and Schedule",
+            icon="🚚",
+            width="stretch",
+        )
+
+    with action_right:
+        if st.button(
+            "Refresh Requests",
+            key=(
+                "owner_refresh_requests"
+                if show_owner_note
+                else "staff_refresh_requests"
+            ),
+            use_container_width=True,
+        ):
+            st.rerun()
+
+    if show_owner_note:
+        st.caption(
+            "The queue is read directly from Neon. "
+            "A request leaves this list after staff "
+            "advances the shipment or pickup status."
+        )
 
 
 # ---------------------------------------------------------
@@ -483,9 +1033,7 @@ def customer_home_page() -> None:
 # Staff Home Page
 # ---------------------------------------------------------
 def staff_home_page() -> None:
-    """
-    Staff-facing landing page.
-    """
+    """Staff-facing landing page with a live Neon request queue."""
 
     apply_custom_styles()
     sidebar_shipping_options()
@@ -493,21 +1041,43 @@ def staff_home_page() -> None:
     hero(
         title="Staff Portal",
         subtitle=(
-            "Support customers, enter shipment requests, schedule pickups, check shipment status, "
-            "and help with payment lookup without accessing owner-level financial analytics."
+            "Review new shipment requests, confirm pickups, assign drivers, "
+            "check shipment status, and support individual customer payments."
         ),
     )
 
     st.markdown(
         """
         <span class="badge-green">Staff Operations</span>
-        <span class="badge-dark">Customer Support</span>
-        <span class="badge-red">Limited Internal View</span>
+        <span class="badge-dark">Live Neon Requests</span>
+        <span class="badge-red">Pickup Action Queue</span>
         """,
         unsafe_allow_html=True,
     )
 
     st.write("")
+
+    try:
+        engine = get_database_engine()
+        verify_dashboard_tables(engine)
+
+        render_new_request_queue(
+            engine,
+            heading="New Requests and Pickup Queue",
+        )
+
+    except Exception as exc:
+        st.error(
+            "The Staff Portal could not load "
+            "the live request queue from Neon."
+        )
+        st.caption(
+            "Technical details: "
+            f"{type(exc).__name__}: "
+            f"{safe_error_message(exc)}"
+        )
+
+    st.divider()
     st.subheader("Staff Tools")
 
     col1, col2, col3 = st.columns(3)
@@ -516,7 +1086,8 @@ def staff_home_page() -> None:
         with st.container(border=True):
             st.markdown("### 📝 Request Shipment")
             st.write(
-                "Create a shipment request on behalf of a customer who calls, visits, or messages the office."
+                "Create a shipment request on behalf of a customer "
+                "who calls, visits, or messages the office."
             )
             st.page_link(
                 "pages/Request_Shipment.py",
@@ -528,7 +1099,8 @@ def staff_home_page() -> None:
         with st.container(border=True):
             st.markdown("### 🚚 Schedule Pickup")
             st.write(
-                "Confirm pickups, review reschedule/cancellation requests, assign drivers, and update pickup status."
+                "Confirm pickup windows, assign drivers, "
+                "and update pickup status."
             )
             st.page_link(
                 "pages/Schedule_Pickup.py",
@@ -540,7 +1112,8 @@ def staff_home_page() -> None:
         with st.container(border=True):
             st.markdown("### 📦 Shipment Status")
             st.write(
-                "Look up a shipment and help customers understand where their package is."
+                "Look up a shipment and help customers "
+                "understand its current status."
             )
             st.page_link(
                 "pages/Track_Shipment.py",
@@ -554,10 +1127,11 @@ def staff_home_page() -> None:
         with st.container(border=True):
             st.markdown("### 💳 Payment Lookup")
             st.write(
-                "Look up an individual customer invoice or shipment payment status."
+                "Look up an individual customer invoice "
+                "or shipment payment status."
             )
             st.page_link(
-                "pages/My_Payments.py",
+                "pages/Payment_Lookup.py",
                 label="Open Payment Lookup",
                 icon="➡️",
             )
@@ -566,7 +1140,8 @@ def staff_home_page() -> None:
         with st.container(border=True):
             st.markdown("### ☎️ Support Request")
             st.write(
-                "Create a support request for shipment, pickup, payment, or delivery questions."
+                "Create or review support activity for shipment, "
+                "pickup, payment, or delivery questions."
             )
             st.page_link(
                 "pages/Contact_Support.py",
@@ -575,7 +1150,9 @@ def staff_home_page() -> None:
             )
 
     st.info(
-        "Staff view is intentionally limited. Company-wide revenue, reports, and AI business analytics are available only in the Owner Portal."
+        "Staff access remains operational. Company-wide revenue, "
+        "reports, and AI business analytics are available only "
+        "in the Owner Portal."
     )
 
 
@@ -583,69 +1160,110 @@ def staff_home_page() -> None:
 # Owner Command Center
 # ---------------------------------------------------------
 def owner_command_center_page() -> None:
-    """
-    Owner command center.
-    """
+    """Owner command center backed by live Neon data."""
 
     apply_custom_styles()
     sidebar_shipping_options()
 
-    data = load_all_data()
-
-    customers = data["customers"]
-    shipments = data["shipments"]
-    pickups = data["pickups"]
-    payments = data["payments"]
-
     hero(
         title="Owner Command Center",
         subtitle=(
-            "Monitor shipments, pickups, customer activity, revenue, outstanding balances, "
-            "reports, AI insights, and operational performance across Solomon Shipping."
+            "Monitor new shipment requests, pending pickups, driver assignment, "
+            "customer activity, revenue, outstanding balances, and operations."
         ),
     )
 
     st.markdown(
         """
         <span class="badge-green">Owner Portal</span>
-        <span class="badge-dark">Business Intelligence</span>
-        <span class="badge-red">Financial Dashboard</span>
+        <span class="badge-dark">Live Neon Intelligence</span>
+        <span class="badge-red">Financial + Request Queue</span>
         """,
         unsafe_allow_html=True,
     )
 
     st.write("")
 
-    col1, col2, col3, col4 = st.columns(4)
+    try:
+        engine = get_database_engine()
+        verify_dashboard_tables(engine)
+        counts = load_dashboard_counts(engine)
 
-    with col1:
-        st.metric("Customers", get_total_customers(customers))
+    except Exception as exc:
+        st.error(
+            "The Owner Command Center could not load "
+            "the live dashboard data from Neon."
+        )
+        st.caption(
+            "Technical details: "
+            f"{type(exc).__name__}: "
+            f"{safe_error_message(exc)}"
+        )
+        return
 
-    with col2:
-        st.metric("Shipments", get_total_shipments(shipments))
+    first_row = st.columns(4)
 
-    with col3:
-        st.metric(
+    first_metrics = [
+        (
+            "Customers",
+            int(counts["total_customers"]),
+        ),
+        (
+            "Shipments",
+            int(counts["total_shipments"]),
+        ),
+        (
             "Revenue Collected",
-            format_currency(get_total_revenue_collected(payments)),
-        )
-
-    with col4:
-        st.metric(
+            format_usd(
+                counts["revenue_collected"]
+            ),
+        ),
+        (
             "Outstanding Balance",
-            format_currency(get_total_outstanding_balance(payments)),
-        )
+            format_usd(
+                counts["outstanding_balance"]
+            ),
+        ),
+    ]
 
-    col5, col6, col7 = st.columns(3)
+    for column, (label, value) in zip(
+        first_row,
+        first_metrics,
+    ):
+        with column:
+            st.metric(label, value)
 
-    with col5:
-        st.metric("Pending Pickups", get_pending_pickups(pickups))
+    second_row = st.columns(3)
 
-    with col6:
-        st.metric("In Transit", get_in_transit_shipments(shipments))
+    second_metrics = [
+        (
+            "Pending Pickups",
+            int(counts["pending_pickups"]),
+        ),
+        (
+            "In Transit",
+            int(counts["in_transit"]),
+        ),
+        (
+            "Delivered",
+            int(counts["delivered"]),
+        ),
+    ]
 
-    with col7:
-        st.metric("Delivered", get_delivered_shipments(shipments))
+    for column, (label, value) in zip(
+        second_row,
+        second_metrics,
+    ):
+        with column:
+            st.metric(label, value)
+
+    st.divider()
+
+    render_new_request_queue(
+        engine,
+        heading="New Requests Requiring Attention",
+        show_owner_note=True,
+    )
 
     st.divider()
 
