@@ -64,25 +64,111 @@ DESTINATION_COUNTRIES = [
     "Other",
 ]
 
-PICKUP_AREAS = [
-    "Queens",
-    "Brooklyn",
-    "Bronx",
-    "Manhattan",
-    "Staten Island",
-    "New Jersey",
-    "Jersey City",
-    "Newark",
-    "Long Island",
-    "Other",
-]
-
 PREFERRED_WINDOWS = [
     "Morning",
     "Afternoon",
     "Evening",
     "Flexible",
 ]
+
+# ------------------------------------------------------------------
+# PLACEHOLDER STARTING RATES
+# ------------------------------------------------------------------
+# These sample rates are intentionally labeled as estimates. They are
+# benchmarked against publicly advertised Caribbean shipping rates and
+# should be replaced with Solomon Shipping's approved commercial rate card.
+GYD_PER_USD = 210.45
+
+GUYANA_DESTINATION_ZONES = [
+    "Georgetown",
+    "East Bank Demerara",
+    "East Coast Demerara",
+    "West Demerara",
+    "Linden",
+    "Berbice",
+    "Essequibo",
+    "Other / Manual Quote",
+]
+
+DELIVERY_METHODS = [
+    "Warehouse Pickup in Guyana",
+    "Door-to-Door Delivery in Guyana",
+]
+
+PICKUP_FEE_USD = {
+    "Warehouse Drop-Off — Orange, NJ": 0.00,
+    "New Jersey — Orange / Newark": 20.00,
+    "New Jersey — Jersey City / Secaucus / Bayonne": 25.00,
+    "New Jersey — Central NJ / Raritan": 40.00,
+    "New York — Queens / Brooklyn": 35.00,
+    "New York — Bronx / Manhattan": 45.00,
+    "New York — Staten Island": 45.00,
+    "New York — Long Island": 60.00,
+    "Other": 75.00,
+}
+
+PICKUP_AREAS = list(PICKUP_FEE_USD.keys())
+
+DOOR_DELIVERY_FEE_USD = {
+    "Georgetown": 20.00,
+    "East Bank Demerara": 30.00,
+    "East Coast Demerara": 35.00,
+    "West Demerara": 40.00,
+    "Linden": 55.00,
+    "Berbice": 70.00,
+    "Essequibo": 85.00,
+    "Other / Manual Quote": 0.00,
+}
+
+SEA_STARTING_RATES_USD = {
+    "Standard Sea — 4–6 Weeks": {
+        "Barrel": 125.00,
+        "Box": 75.00,
+        "Crate": 135.00,
+        "Suitcase": 95.00,
+        "Document": 35.00,
+        "Household Goods": 150.00,
+        "Electronics": 95.00,
+        "Food Items": 75.00,
+        "Clothing": 75.00,
+        "Other": 100.00,
+    },
+    "Express Sea — Approx. 3 Weeks": {
+        "Barrel": 150.00,
+        "Box": 95.00,
+        "Crate": 165.00,
+        "Suitcase": 115.00,
+        "Document": 50.00,
+        "Household Goods": 185.00,
+        "Electronics": 120.00,
+        "Food Items": 95.00,
+        "Clothing": 95.00,
+        "Other": 125.00,
+    },
+}
+
+AIR_RATE_PER_LB_USD = {
+    "Standard Air — 7–10 Business Days": 3.00,
+    "Express Air — 3–5 Business Days": 3.40,
+}
+
+AIR_MINIMUM_USD = {
+    "Standard Air — 7–10 Business Days": 45.00,
+    "Express Air — 3–5 Business Days": 55.00,
+}
+
+ASSUMED_WEIGHT_LBS = {
+    "Barrel": 100.0,
+    "Box": 25.0,
+    "Crate": 75.0,
+    "Suitcase": 40.0,
+    "Document": 1.0,
+    "Household Goods": 100.0,
+    "Electronics": 30.0,
+    "Food Items": 25.0,
+    "Clothing": 25.0,
+    "Other": 35.0,
+}
 
 
 def _to_plain_mapping(value: Any) -> Any:
@@ -657,6 +743,320 @@ def find_existing_customer_id(
     return str(name_phone_match) if name_phone_match else None
 
 
+
+def parse_number(value: Any) -> float:
+    """Extract the first numeric value from a form or stored text value."""
+
+    if value is None:
+        return 0.0
+
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    match = re.search(
+        r"-?\d+(?:\.\d+)?",
+        str(value).replace(",", ""),
+    )
+
+    if not match:
+        return 0.0
+
+    try:
+        return float(match.group(0))
+    except ValueError:
+        return 0.0
+
+
+def calculate_estimated_quote(
+    *,
+    shipping_option: str,
+    item_type: str,
+    quantity: int,
+    estimated_weight_lbs: float,
+    pickup_area: str,
+    destination_country: str,
+    destination_zone: str,
+    delivery_method: str,
+    special_handling: list[str],
+    declared_value_usd: float,
+) -> dict[str, Any]:
+    """
+    Calculate a transparent placeholder starting estimate.
+
+    Air uses a public-rate benchmark per pound. Sea uses a practical
+    item-based starting price, with a barrel benchmark of US$125 for
+    standard sea and a modest premium for express sea.
+    """
+
+    quantity_value = max(int(quantity), 1)
+    entered_weight = max(float(estimated_weight_lbs or 0), 0.0)
+
+    assumed_weight = (
+        ASSUMED_WEIGHT_LBS.get(
+            item_type,
+            35.0,
+        )
+        * quantity_value
+    )
+
+    billable_weight = (
+        entered_weight
+        if entered_weight > 0
+        else assumed_weight
+    )
+
+    used_assumed_weight = entered_weight <= 0
+
+    if "Air" in shipping_option:
+        rate_per_lb = AIR_RATE_PER_LB_USD[
+            shipping_option
+        ]
+
+        minimum_charge = AIR_MINIMUM_USD[
+            shipping_option
+        ]
+
+        freight_usd = max(
+            billable_weight * rate_per_lb,
+            minimum_charge,
+        )
+
+        pricing_basis = (
+            f"{billable_weight:,.1f} lb × "
+            f"US${rate_per_lb:,.2f}/lb"
+        )
+
+    else:
+        item_rates = SEA_STARTING_RATES_USD[
+            shipping_option
+        ]
+
+        rate_per_item = item_rates.get(
+            item_type,
+            item_rates["Other"],
+        )
+
+        freight_usd = (
+            rate_per_item
+            * quantity_value
+        )
+
+        pricing_basis = (
+            f"{quantity_value} × "
+            f"{item_type} starting rate "
+            f"of US${rate_per_item:,.2f}"
+        )
+
+    pickup_fee_usd = PICKUP_FEE_USD.get(
+        pickup_area,
+        PICKUP_FEE_USD["Other"],
+    )
+
+    if (
+        destination_country == "Guyana"
+        and delivery_method
+        == "Door-to-Door Delivery in Guyana"
+    ):
+        destination_delivery_fee_usd = (
+            DOOR_DELIVERY_FEE_USD.get(
+                destination_zone,
+                0.0,
+            )
+        )
+    else:
+        destination_delivery_fee_usd = 0.0
+
+    handling_items = {
+        item.strip()
+        for item in special_handling
+        if item.strip()
+        and item != "No Special Handling"
+    }
+
+    special_handling_fee_usd = 0.0
+
+    if "Fragile" in handling_items:
+        special_handling_fee_usd += 15.0
+
+    if "Heavy Item" in handling_items:
+        special_handling_fee_usd += 20.0
+
+    if "Keep Dry" in handling_items:
+        special_handling_fee_usd += 5.0
+
+    insurance_fee_usd = round(
+        max(
+            float(declared_value_usd or 0),
+            0.0,
+        )
+        * 0.015,
+        2,
+    )
+
+    manual_quote_required = (
+        destination_country != "Guyana"
+        or destination_zone
+        == "Other / Manual Quote"
+        or pickup_area == "Other"
+    )
+
+    subtotal_usd = (
+        freight_usd
+        + pickup_fee_usd
+        + destination_delivery_fee_usd
+        + special_handling_fee_usd
+        + insurance_fee_usd
+    )
+
+    estimated_total_usd = round(
+        subtotal_usd,
+        2,
+    )
+
+    estimated_total_gyd = round(
+        estimated_total_usd
+        * GYD_PER_USD,
+        2,
+    )
+
+    return {
+        "freight_usd": round(
+            freight_usd,
+            2,
+        ),
+        "pickup_fee_usd": round(
+            pickup_fee_usd,
+            2,
+        ),
+        "destination_delivery_fee_usd": round(
+            destination_delivery_fee_usd,
+            2,
+        ),
+        "special_handling_fee_usd": round(
+            special_handling_fee_usd,
+            2,
+        ),
+        "insurance_fee_usd": insurance_fee_usd,
+        "estimated_total_usd": estimated_total_usd,
+        "estimated_total_gyd": estimated_total_gyd,
+        "exchange_rate_gyd_per_usd": GYD_PER_USD,
+        "pricing_basis": pricing_basis,
+        "billable_weight_lbs": round(
+            billable_weight,
+            1,
+        ),
+        "used_assumed_weight": used_assumed_weight,
+        "manual_quote_required": manual_quote_required,
+        "quote_status": (
+            "Manual Review Required"
+            if manual_quote_required
+            else "Starting Estimate"
+        ),
+    }
+
+
+def render_quote_estimate(
+    quote: dict[str, Any],
+) -> None:
+    """Render the customer-facing USD and GYD starting estimate."""
+
+    st.markdown(
+        "### Estimated Starting Price"
+    )
+
+    first, second, third = st.columns(3)
+
+    with first:
+        st.metric(
+            "Estimated Total (USD)",
+            f"US${quote['estimated_total_usd']:,.2f}",
+        )
+
+    with second:
+        st.metric(
+            "Estimated Equivalent (GYD)",
+            f"G${quote['estimated_total_gyd']:,.2f}",
+        )
+
+    with third:
+        st.metric(
+            "Quote Status",
+            quote["quote_status"],
+        )
+
+    breakdown = pd.DataFrame(
+        [
+            {
+                "Price Component": "Base Freight",
+                "Amount (USD)": (
+                    quote["freight_usd"]
+                ),
+            },
+            {
+                "Price Component": "U.S. Pickup",
+                "Amount (USD)": (
+                    quote["pickup_fee_usd"]
+                ),
+            },
+            {
+                "Price Component": "Guyana Delivery",
+                "Amount (USD)": (
+                    quote[
+                        "destination_delivery_fee_usd"
+                    ]
+                ),
+            },
+            {
+                "Price Component": "Special Handling",
+                "Amount (USD)": (
+                    quote[
+                        "special_handling_fee_usd"
+                    ]
+                ),
+            },
+            {
+                "Price Component": "Declared-Value Protection",
+                "Amount (USD)": (
+                    quote["insurance_fee_usd"]
+                ),
+            },
+        ]
+    )
+
+    st.dataframe(
+        breakdown,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.caption(
+        "Pricing basis: "
+        f"{quote['pricing_basis']}. "
+        f"GYD conversion uses US$1 = "
+        f"G${quote['exchange_rate_gyd_per_usd']:,.2f}."
+    )
+
+    if quote["used_assumed_weight"]:
+        st.info(
+            "No weight was entered, so the estimate uses a "
+            "reasonable placeholder weight for the selected item."
+        )
+
+    if quote["manual_quote_required"]:
+        st.warning(
+            "This route needs staff review. The displayed amount is "
+            "only a starting estimate and may change."
+        )
+
+    st.info(
+        "This is a placeholder starting estimate, not the final invoice. "
+        "Solomon Shipping may adjust the price after inspecting, weighing, "
+        "or measuring the shipment and confirming pickup, delivery, customs, "
+        "and carrier requirements."
+    )
+
+
+
 def build_shipment_notes(data: dict[str, Any]) -> str:
     """Combine intake details that do not yet have dedicated table columns."""
 
@@ -671,6 +1071,27 @@ def build_shipment_notes(data: dict[str, Any]) -> str:
         f"Declared value: {data['declared_value'] or 'Not provided'}",
         f"Special handling: {data['special_handling'] or 'None'}",
         f"Payment preference: {data['payment_terms']}",
+        f"Destination zone: {data['destination_zone']}",
+        f"Delivery method: {data['delivery_method']}",
+        f"Quote status: {data['quote_status']}",
+        f"Pricing basis: {data['pricing_basis']}",
+        f"Estimated freight USD: {data['freight_usd']:.2f}",
+        f"US pickup fee USD: {data['pickup_fee_usd']:.2f}",
+        (
+            "Guyana delivery fee USD: "
+            f"{data['destination_delivery_fee_usd']:.2f}"
+        ),
+        (
+            "Special handling fee USD: "
+            f"{data['special_handling_fee_usd']:.2f}"
+        ),
+        f"Insurance fee USD: {data['insurance_fee_usd']:.2f}",
+        f"Estimated total USD: {data['estimated_total_usd']:.2f}",
+        f"Estimated total GYD: {data['estimated_total_gyd']:.2f}",
+        (
+            "Exchange rate GYD per USD: "
+            f"{data['exchange_rate_gyd_per_usd']:.2f}"
+        ),
     ]
 
     if data["pickup_notes"]:
@@ -820,9 +1241,9 @@ def save_shipment_request(data: dict[str, Any]) -> dict[str, Any]:
                     :destination_country,
                     :destination_city,
                     'Request Received',
+                    :amount_charged,
                     0,
-                    0,
-                    0,
+                    :balance_due,
                     'Unpaid',
                     :notes,
                     :service_type,
@@ -845,6 +1266,8 @@ def save_shipment_request(data: dict[str, Any]) -> dict[str, Any]:
                 "notes": build_shipment_notes(data),
                 "service_type": data["shipping_option"],
                 "shipment_mode": shipment_mode,
+                "amount_charged": data["estimated_total_usd"],
+                "balance_due": data["estimated_total_usd"],
             },
         )
 
@@ -951,6 +1374,11 @@ def save_shipment_request(data: dict[str, Any]) -> dict[str, Any]:
         "request_status": "Request Received",
         "pickup_status": "Pending Confirmation",
         "database_connection": connection_source,
+        "amount_charged": data["estimated_total_usd"],
+        "balance_due": data["estimated_total_usd"],
+        "payment_status": "Unpaid",
+        "release_status": "Pending Review",
+        "shipment_mode": shipment_mode,
     }
 
 
@@ -979,6 +1407,18 @@ def _confirmation_value(
     clean_value = str(value).strip()
 
     return clean_value or default
+
+
+def _format_usd(value: Any) -> str:
+    """Format a value as U.S. dollars for confirmations."""
+
+    return f"US${parse_number(value):,.2f}"
+
+
+def _format_gyd(value: Any) -> str:
+    """Format a value as Guyana dollars for confirmations."""
+
+    return f"G${parse_number(value):,.2f}"
 
 
 def _pdf_safe_text(value: Any) -> str:
@@ -1383,10 +1823,11 @@ def build_shipment_confirmation_pdf(
                 Paragraph(
                     (
                         "This document confirms that Solomon Shipping received "
-                        "the shipment request. It is not a final invoice and it "
-                        "does not confirm the official pickup window. Staff will "
-                        "review the request and contact the customer with pricing "
-                        "and pickup confirmation."
+                        "the shipment request and records the starting estimate "
+                        "shown below. It is not the final invoice and it does not "
+                        "confirm the official pickup window. Staff may adjust the "
+                        "price after inspection, weighing, measurement, customs, "
+                        "carrier, pickup, and delivery review."
                     ),
                     notice_style,
                 )
@@ -1710,6 +2151,80 @@ def build_shipment_confirmation_pdf(
             ],
         ),
         (
+            "Estimated Starting Price",
+            [
+                (
+                    "Quote Status",
+                    record.get("quote_status"),
+                ),
+                (
+                    "Pricing Basis",
+                    record.get("pricing_basis"),
+                ),
+                (
+                    "Base Freight",
+                    _format_usd(
+                        record.get("freight_usd")
+                    ),
+                ),
+                (
+                    "U.S. Pickup Fee",
+                    _format_usd(
+                        record.get("pickup_fee_usd")
+                    ),
+                ),
+                (
+                    "Guyana Delivery Fee",
+                    _format_usd(
+                        record.get(
+                            "destination_delivery_fee_usd"
+                        )
+                    ),
+                ),
+                (
+                    "Special Handling Fee",
+                    _format_usd(
+                        record.get(
+                            "special_handling_fee_usd"
+                        )
+                    ),
+                ),
+                (
+                    "Declared-Value Protection",
+                    _format_usd(
+                        record.get("insurance_fee_usd")
+                    ),
+                ),
+                (
+                    "Estimated Total (USD)",
+                    _format_usd(
+                        record.get("estimated_total_usd")
+                    ),
+                ),
+                (
+                    "Estimated Equivalent (GYD)",
+                    _format_gyd(
+                        record.get("estimated_total_gyd")
+                    ),
+                ),
+                (
+                    "Exchange Rate Used",
+                    (
+                        "US$1 = G$"
+                        f"{parse_number(record.get('exchange_rate_gyd_per_usd')):,.2f}"
+                    ),
+                ),
+                (
+                    "Destination Zone",
+                    record.get("destination_zone"),
+                ),
+                (
+                    "Delivery Method",
+                    record.get("delivery_method"),
+                ),
+            ],
+        ),
+        (
             "Payment Preference",
             [
                 (
@@ -1822,6 +2337,9 @@ def load_saved_shipment_confirmation(
                     s.destination_country,
                     s.destination_city,
                     s.current_status,
+                    s.amount_charged,
+                    s.amount_paid,
+                    s.balance_due,
                     s.payment_status,
                     s.release_status,
                     s.notes AS shipment_notes,
@@ -1971,6 +2489,69 @@ def load_saved_shipment_confirmation(
         "payment_notes": note_fields.get(
             "payment notes"
         ),
+        "destination_zone": note_fields.get(
+            "destination zone"
+        ),
+        "delivery_method": note_fields.get(
+            "delivery method"
+        ),
+        "quote_status": note_fields.get(
+            "quote status"
+        ),
+        "pricing_basis": note_fields.get(
+            "pricing basis"
+        ),
+        "freight_usd": parse_number(
+            note_fields.get(
+                "estimated freight usd"
+            )
+        ),
+        "pickup_fee_usd": parse_number(
+            note_fields.get(
+                "us pickup fee usd"
+            )
+        ),
+        "destination_delivery_fee_usd": parse_number(
+            note_fields.get(
+                "guyana delivery fee usd"
+            )
+        ),
+        "special_handling_fee_usd": parse_number(
+            note_fields.get(
+                "special handling fee usd"
+            )
+        ),
+        "insurance_fee_usd": parse_number(
+            note_fields.get(
+                "insurance fee usd"
+            )
+        ),
+        "estimated_total_usd": parse_number(
+            note_fields.get(
+                "estimated total usd"
+            )
+        ) or parse_number(
+            row_data.get("amount_charged")
+        ),
+        "estimated_total_gyd": parse_number(
+            note_fields.get(
+                "estimated total gyd"
+            )
+        ),
+        "exchange_rate_gyd_per_usd": parse_number(
+            note_fields.get(
+                "exchange rate gyd per usd"
+            )
+        ) or GYD_PER_USD,
+        "amount_charged": row_data.get(
+            "amount_charged"
+        ),
+        "amount_paid": row_data.get(
+            "amount_paid"
+        ),
+        "balance_due": row_data.get(
+            "balance_due"
+        ),
         "payment_status": row_data.get("payment_status"),
         "release_status": row_data.get("release_status"),
     }
@@ -2036,6 +2617,9 @@ def initialize_request_storage() -> None:
     if "retrieved_shipment_confirmation" not in st.session_state:
         st.session_state.retrieved_shipment_confirmation = None
 
+    if "last_shipping_quote" not in st.session_state:
+        st.session_state.last_shipping_quote = None
+
 
 def display_confirmation(
     record: dict[str, Any],
@@ -2044,22 +2628,51 @@ def display_confirmation(
         "Your shipment request was saved successfully."
     ),
 ) -> None:
-    """Show the confirmation and provide a customer-ready PDF download."""
+    """Show the confirmation and provide a compact customer receipt button."""
 
     st.success(success_message)
-    st.markdown("### Your Shipment ID")
-    st.code(
-        record["shipment_id"],
-        language=None,
+
+    heading_left, heading_right = st.columns(
+        [3.8, 1.2],
+        vertical_alignment="bottom",
     )
 
-    st.warning(
-        "Save this Shipment ID. You will need it to track the shipment, "
-        "review payment information, manage the request, or contact support. "
-        "The pickup window and final price are still pending confirmation."
+    with heading_left:
+        st.markdown("### Your Shipment ID")
+        st.code(
+            record["shipment_id"],
+            language=None,
+        )
+
+    with heading_right:
+        pdf_bytes = build_shipment_confirmation_pdf(
+            record
+        )
+
+        with st.container(
+            key=(
+                "customer_receipt_download_"
+                f"{key_prefix}"
+            )
+        ):
+            st.download_button(
+                label="Download Customer Receipt",
+                data=pdf_bytes,
+                file_name=(
+                    f"{record['shipment_id']}_"
+                    "customer_receipt.pdf"
+                ),
+                mime="application/pdf",
+                key=f"{key_prefix}_pdf_download",
+                use_container_width=True,
+            )
+
+    st.caption(
+        "Keep the Shipment ID and receipt for tracking, "
+        "payment lookup, shipment changes, and support."
     )
 
-    first, second, third = st.columns(3)
+    first, second, third, fourth = st.columns(4)
 
     with first:
         st.metric(
@@ -2079,35 +2692,25 @@ def display_confirmation(
 
     with third:
         st.metric(
-            "Customer ID",
-            _confirmation_value(
-                record.get("customer_id")
+            "Estimated Total (USD)",
+            _format_usd(
+                record.get("estimated_total_usd")
             ),
         )
 
-    pdf_bytes = build_shipment_confirmation_pdf(
-        record
-    )
+    with fourth:
+        st.metric(
+            "Estimated Equivalent (GYD)",
+            _format_gyd(
+                record.get("estimated_total_gyd")
+            ),
+        )
 
-    st.download_button(
-        label=(
-            "Download Shipment Request "
-            "Confirmation (PDF)"
-        ),
-        data=pdf_bytes,
-        file_name=(
-            f"{record['shipment_id']}_"
-            "shipment_request_confirmation.pdf"
-        ),
-        mime="application/pdf",
-        key=f"{key_prefix}_pdf_download",
-        use_container_width=True,
-    )
-
-    st.caption(
-        "This PDF is a permanent request confirmation. "
-        "It is not the final invoice and does not confirm "
-        "the official pickup window."
+    st.info(
+        "The price shown is a placeholder starting estimate. "
+        "It is not the final invoice. Solomon Shipping may adjust "
+        "the amount after reviewing the shipment, route, pickup, "
+        "delivery, customs, weight, and dimensions."
     )
 
 
@@ -2209,14 +2812,18 @@ def main() -> None:
 
     hero(
         title="Request Shipment",
-        subtitle=get_page_subtitle(),
+        subtitle=(
+            "Enter the shipment details, review a realistic placeholder "
+            "starting estimate in U.S. and Guyana dollars, submit the request, "
+            "and download a permanent customer receipt."
+        ),
     )
 
     st.markdown(
         f"""
         <span class="badge-green">{portal_label}</span>
-        <span class="badge-dark">Shipment Intake</span>
-        <span class="badge-red">Preferred Pickup Only</span>
+        <span class="badge-dark">Instant Starting Estimate</span>
+        <span class="badge-red">Final Review Required</span>
         """,
         unsafe_allow_html=True,
     )
@@ -2224,51 +2831,90 @@ def main() -> None:
     st.write("")
 
     st.info(
-        "A permanent Shipment ID is generated after the request is successfully saved. "
-        "Pickup times entered here are preferred availability only."
+        "Pickup times are preferred availability only. The displayed price "
+        "is a placeholder starting estimate and may change after staff reviews "
+        "the shipment, route, weight, dimensions, pickup, delivery, customs, "
+        "and carrier requirements."
     )
 
     st.subheader("Shipment Request Form")
 
-    with st.form("shipment_request_form", clear_on_submit=False):
+    with st.form(
+        "shipment_request_form",
+        clear_on_submit=False,
+    ):
         st.markdown("### Customer Information")
         customer_col1, customer_col2 = st.columns(2)
 
         with customer_col1:
-            customer_name = st.text_input("Full Name *")
-            phone = st.text_input("Phone Number *")
-            email = st.text_input("Email Address")
+            customer_name = st.text_input(
+                "Full Name *"
+            )
+            phone = st.text_input(
+                "Phone Number *"
+            )
+            email = st.text_input(
+                "Email Address"
+            )
 
         with customer_col2:
             customer_type = st.selectbox(
                 "Customer Type",
-                ["New Customer", "Returning Customer"],
+                [
+                    "New Customer",
+                    "Returning Customer",
+                ],
             )
             preferred_contact = st.selectbox(
                 "Preferred Contact Method",
-                ["Phone", "Email", "WhatsApp", "Text Message"],
+                [
+                    "Phone",
+                    "Email",
+                    "WhatsApp",
+                    "Text Message",
+                ],
             )
             requested_by = st.text_input(
                 "Request Entered By",
-                value="Customer" if portal_label == "Customer Portal" else portal_label,
+                value=(
+                    "Customer"
+                    if portal_label
+                    == "Customer Portal"
+                    else portal_label
+                ),
             )
 
         st.divider()
-        st.markdown("### Preferred Pickup Information")
+        st.markdown(
+            "### Preferred U.S. Pickup Information"
+        )
         st.caption(
-            "This is not the final confirmed pickup schedule. Staff will confirm the official two-hour window after reviewing driver availability and route capacity."
+            "Staff will confirm the official two-hour pickup window "
+            "after checking route and driver capacity."
         )
 
         pickup_col1, pickup_col2 = st.columns(2)
 
         with pickup_col1:
-            pickup_address = st.text_input("Pickup Address *")
-            pickup_city = st.text_input("Pickup City *")
-            pickup_state = st.text_input("Pickup State *", value="NJ")
-            pickup_zip = st.text_input("Pickup ZIP Code")
+            pickup_address = st.text_input(
+                "Pickup Address *"
+            )
+            pickup_city = st.text_input(
+                "Pickup City *"
+            )
+            pickup_state = st.text_input(
+                "Pickup State *",
+                value="NJ",
+            )
+            pickup_zip = st.text_input(
+                "Pickup ZIP Code"
+            )
 
         with pickup_col2:
-            pickup_area = st.selectbox("Pickup Area / Route", PICKUP_AREAS)
+            pickup_area = st.selectbox(
+                "U.S. Pickup Zone",
+                PICKUP_AREAS,
+            )
             preferred_pickup_date = st.date_input(
                 "Preferred Pickup Date",
                 value=date.today(),
@@ -2279,7 +2925,10 @@ def main() -> None:
                 PREFERRED_WINDOWS,
             )
             pickup_flexibility = st.selectbox(
-                "If this time is unavailable, can we offer another window?",
+                (
+                    "If this time is unavailable, "
+                    "can we offer another window?"
+                ),
                 [
                     "Yes, any available time that day",
                     "Yes, but contact me first",
@@ -2289,40 +2938,75 @@ def main() -> None:
 
         pickup_notes = st.text_area(
             "Pickup Notes",
-            placeholder="Add gate code, apartment number, parking instructions, best contact person, or preferred pickup notes.",
-            height=100,
+            placeholder=(
+                "Add gate code, apartment number, "
+                "parking instructions, or best contact person."
+            ),
+            height=90,
         )
 
         st.divider()
-        st.markdown("### Destination Information")
-        destination_col1, destination_col2 = st.columns(2)
+        st.markdown(
+            "### Destination and Delivery"
+        )
+
+        destination_col1, destination_col2 = (
+            st.columns(2)
+        )
 
         with destination_col1:
             destination_country = st.selectbox(
                 "Destination Country *",
                 DESTINATION_COUNTRIES,
             )
-            destination_city = st.text_input("Destination City / Area *")
+            destination_city = st.text_input(
+                "Destination City / Area *"
+            )
+            destination_zone = st.selectbox(
+                "Guyana Destination Zone",
+                GUYANA_DESTINATION_ZONES,
+            )
 
         with destination_col2:
-            recipient_name = st.text_input("Recipient Name *")
-            recipient_phone = st.text_input("Recipient Phone Number *")
+            recipient_name = st.text_input(
+                "Recipient Name *"
+            )
+            recipient_phone = st.text_input(
+                "Recipient Phone Number *"
+            )
+            delivery_method = st.selectbox(
+                "Delivery Method in Guyana",
+                DELIVERY_METHODS,
+            )
 
         st.divider()
         st.markdown("### Shipment Details")
-        shipment_col1, shipment_col2 = st.columns(2)
+
+        shipment_col1, shipment_col2 = (
+            st.columns(2)
+        )
 
         with shipment_col1:
-            item_type = st.selectbox("Item Type", ITEM_TYPES)
+            item_type = st.selectbox(
+                "Item Type",
+                ITEM_TYPES,
+            )
             quantity = st.number_input(
                 "Quantity",
                 min_value=1,
                 step=1,
                 value=1,
             )
-            estimated_weight = st.text_input(
-                "Estimated Weight, if known",
-                placeholder="Example: 50 lbs",
+            estimated_weight_lbs = st.number_input(
+                "Estimated Total Weight (lb)",
+                min_value=0.0,
+                step=1.0,
+                value=0.0,
+                help=(
+                    "Leave at 0 when unknown. "
+                    "The calculator will use a placeholder "
+                    "weight for the selected item."
+                ),
             )
 
         with shipment_col2:
@@ -2330,9 +3014,11 @@ def main() -> None:
                 "Preferred Shipping Option",
                 SHIPPING_OPTIONS,
             )
-            declared_value = st.text_input(
-                "Declared Value, if applicable",
-                placeholder="Example: $250",
+            declared_value_usd = st.number_input(
+                "Declared Value (USD), if applicable",
+                min_value=0.0,
+                step=25.0,
+                value=0.0,
             )
             special_handling = st.multiselect(
                 "Special Handling",
@@ -2344,13 +3030,18 @@ def main() -> None:
                     "Documents",
                     "No Special Handling",
                 ],
-                default=["No Special Handling"],
+                default=[
+                    "No Special Handling"
+                ],
             )
 
         shipment_notes = st.text_area(
             "Additional Shipment Notes",
-            placeholder="Add item details, delivery notes, or special requests.",
-            height=120,
+            placeholder=(
+                "Add item details, delivery notes, "
+                "or special requests."
+            ),
+            height=100,
         )
 
         st.divider()
@@ -2368,14 +3059,69 @@ def main() -> None:
 
         payment_notes = st.text_area(
             "Payment Notes",
-            placeholder="Example: Sender pays deposit in New Jersey, receiver pays balance in Guyana.",
-            height=80,
+            placeholder=(
+                "Example: Sender pays deposit in New Jersey; "
+                "receiver pays the balance in Guyana."
+            ),
+            height=75,
         )
 
-        submitted = st.form_submit_button(
-            "Submit Shipment Request",
-            use_container_width=True,
+        estimate_acknowledgement = st.checkbox(
+            (
+                "I understand that the displayed amount is a "
+                "starting estimate and not the final invoice."
+            )
         )
+
+        button_left, button_right = st.columns(
+            [1, 1]
+        )
+
+        with button_left:
+            calculate_submitted = (
+                st.form_submit_button(
+                    "Calculate Starting Price",
+                    use_container_width=True,
+                )
+            )
+
+        with button_right:
+            submitted = (
+                st.form_submit_button(
+                    "Submit Shipment Request",
+                    use_container_width=True,
+                    type="primary",
+                )
+            )
+
+    quote = calculate_estimated_quote(
+        shipping_option=shipping_option,
+        item_type=item_type,
+        quantity=int(quantity),
+        estimated_weight_lbs=(
+            float(estimated_weight_lbs)
+        ),
+        pickup_area=pickup_area,
+        destination_country=(
+            destination_country
+        ),
+        destination_zone=(
+            destination_zone
+        ),
+        delivery_method=delivery_method,
+        special_handling=(
+            special_handling
+        ),
+        declared_value_usd=(
+            float(declared_value_usd)
+        ),
+    )
+
+    if calculate_submitted:
+        st.session_state.last_shipping_quote = (
+            quote
+        )
+        render_quote_estimate(quote)
 
     if submitted:
         required_fields = {
@@ -2386,12 +3132,15 @@ def main() -> None:
             "Pickup State": pickup_state,
             "Destination City": destination_city,
             "Recipient Name": recipient_name,
-            "Recipient Phone Number": recipient_phone,
+            "Recipient Phone Number": (
+                recipient_phone
+            ),
         }
 
         missing_fields = [
             label
-            for label, value in required_fields.items()
+            for label, value
+            in required_fields.items()
             if not str(value).strip()
         ]
 
@@ -2401,52 +3150,143 @@ def main() -> None:
                 + ", ".join(missing_fields)
                 + "."
             )
+
+        elif not estimate_acknowledgement:
+            st.error(
+                "Please acknowledge that this is "
+                "a starting estimate before submitting."
+            )
+
         else:
+            estimated_weight_text = (
+                f"{float(estimated_weight_lbs):,.1f} lb"
+                if estimated_weight_lbs > 0
+                else (
+                    f"Assumed "
+                    f"{quote['billable_weight_lbs']:,.1f} lb "
+                    "for estimate"
+                )
+            )
+
+            declared_value_text = (
+                f"US${float(declared_value_usd):,.2f}"
+                if declared_value_usd > 0
+                else ""
+            )
+
             form_data = {
-                "entered_from_portal": portal_label,
-                "requested_by": requested_by.strip() or portal_label,
-                "customer_name": customer_name.strip(),
+                "entered_from_portal": (
+                    portal_label
+                ),
+                "requested_by": (
+                    requested_by.strip()
+                    or portal_label
+                ),
+                "customer_name": (
+                    customer_name.strip()
+                ),
                 "phone": phone.strip(),
                 "email": email.strip(),
                 "customer_type": customer_type,
-                "preferred_contact": preferred_contact,
-                "pickup_address": pickup_address.strip(),
-                "pickup_city": pickup_city.strip(),
-                "pickup_state": pickup_state.strip(),
-                "pickup_zip": pickup_zip.strip(),
+                "preferred_contact": (
+                    preferred_contact
+                ),
+                "pickup_address": (
+                    pickup_address.strip()
+                ),
+                "pickup_city": (
+                    pickup_city.strip()
+                ),
+                "pickup_state": (
+                    pickup_state.strip()
+                ),
+                "pickup_zip": (
+                    pickup_zip.strip()
+                ),
                 "pickup_area": pickup_area,
-                "preferred_pickup_date": preferred_pickup_date,
-                "preferred_pickup_window": preferred_pickup_window,
-                "pickup_flexibility": pickup_flexibility,
-                "pickup_notes": pickup_notes.strip(),
-                "destination_country": destination_country,
-                "destination_city": destination_city.strip(),
-                "recipient_name": recipient_name.strip(),
-                "recipient_phone": recipient_phone.strip(),
+                "preferred_pickup_date": (
+                    preferred_pickup_date
+                ),
+                "preferred_pickup_window": (
+                    preferred_pickup_window
+                ),
+                "pickup_flexibility": (
+                    pickup_flexibility
+                ),
+                "pickup_notes": (
+                    pickup_notes.strip()
+                ),
+                "destination_country": (
+                    destination_country
+                ),
+                "destination_city": (
+                    destination_city.strip()
+                ),
+                "destination_zone": (
+                    destination_zone
+                ),
+                "delivery_method": (
+                    delivery_method
+                ),
+                "recipient_name": (
+                    recipient_name.strip()
+                ),
+                "recipient_phone": (
+                    recipient_phone.strip()
+                ),
                 "item_type": item_type,
                 "quantity": int(quantity),
-                "estimated_weight": estimated_weight.strip(),
-                "shipping_option": shipping_option,
-                "declared_value": declared_value.strip(),
-                "special_handling": ", ".join(special_handling),
-                "shipment_notes": shipment_notes.strip(),
+                "estimated_weight": (
+                    estimated_weight_text
+                ),
+                "shipping_option": (
+                    shipping_option
+                ),
+                "declared_value": (
+                    declared_value_text
+                ),
+                "special_handling": (
+                    ", ".join(
+                        special_handling
+                    )
+                ),
+                "shipment_notes": (
+                    shipment_notes.strip()
+                ),
                 "payment_terms": payment_terms,
-                "payment_notes": payment_notes.strip(),
+                "payment_notes": (
+                    payment_notes.strip()
+                ),
+                **quote,
             }
 
             try:
+                render_quote_estimate(quote)
+
                 with st.spinner(
-                    "Saving the shipment request and generating the Shipment ID..."
+                    "Saving the shipment request "
+                    "and generating the Shipment ID..."
                 ):
-                    database_result = save_shipment_request(form_data)
+                    database_result = (
+                        save_shipment_request(
+                            form_data
+                        )
+                    )
 
                 request_record = {
                     **database_result,
                     **form_data,
                 }
 
-                st.session_state.shipment_request_records.append(request_record)
-                st.session_state.last_shipment_confirmation = request_record
+                st.session_state.shipment_request_records.append(
+                    request_record
+                )
+                st.session_state.last_shipment_confirmation = (
+                    request_record
+                )
+                st.session_state.last_shipping_quote = (
+                    quote
+                )
 
                 display_confirmation(
                     request_record,
@@ -2456,22 +3296,32 @@ def main() -> None:
             except Exception as exc:
                 st.session_state.last_shipment_confirmation = None
                 st.error(
-                    "The shipment request was not saved, so no Shipment ID was issued."
+                    "The shipment request was not saved, "
+                    "so no Shipment ID was issued."
                 )
                 st.caption(
                     "Technical details: "
-                    f"{type(exc).__name__}: {safe_error_message(exc)}"
+                    f"{type(exc).__name__}: "
+                    f"{safe_error_message(exc)}"
                 )
 
-    elif st.session_state.last_shipment_confirmation:
+    elif (
+        st.session_state.last_shipment_confirmation
+    ):
         with st.expander(
-            "View and download the most recent shipment confirmation"
+            "View and download the most recent "
+            "shipment confirmation"
         ):
             display_confirmation(
-                st.session_state.last_shipment_confirmation,
-                key_prefix="recent_confirmation",
+                st.session_state[
+                    "last_shipment_confirmation"
+                ],
+                key_prefix=(
+                    "recent_confirmation"
+                ),
                 success_message=(
-                    "Your most recent shipment confirmation is ready."
+                    "Your most recent shipment "
+                    "confirmation is ready."
                 ),
             )
 
@@ -2480,34 +3330,62 @@ def main() -> None:
     render_confirmation_retrieval()
 
     st.divider()
-    st.subheader("How the Pickup Confirmation Process Works")
-    process_col1, process_col2, process_col3 = st.columns(3)
+    st.subheader(
+        "How the Pickup Confirmation Process Works"
+    )
+
+    process_col1, process_col2, process_col3 = (
+        st.columns(3)
+    )
 
     with process_col1:
         with st.container(border=True):
-            st.markdown("### 1. Submit Request")
+            st.markdown(
+                "### 1. Calculate and Submit"
+            )
             st.write(
-                "The customer submits the request and immediately receives a permanent Shipment ID."
+                "The customer reviews a starting "
+                "estimate, submits the request, and "
+                "receives a permanent Shipment ID."
             )
 
     with process_col2:
         with st.container(border=True):
-            st.markdown("### 2. Staff Reviews")
+            st.markdown(
+                "### 2. Staff Reviews"
+            )
             st.write(
-                "Staff checks route capacity, driver availability, pickup area, and shipment details."
+                "Staff verifies the cargo, price, "
+                "route capacity, driver availability, "
+                "and pickup details."
             )
 
     with process_col3:
         with st.container(border=True):
-            st.markdown("### 3. Pickup Window Confirmed")
+            st.markdown(
+                "### 3. Final Invoice and Pickup"
+            )
             st.write(
-                "Solomon Shipping confirms the official pickup window and updates the same Shipment ID."
+                "Solomon Shipping confirms the final "
+                "price and pickup window using the "
+                "same Shipment ID."
             )
 
     if st.session_state.shipment_request_records:
-        with st.expander("View submitted requests from this session"):
-            session_df = pd.DataFrame(st.session_state.shipment_request_records)
-            st.dataframe(session_df, use_container_width=True)
+        with st.expander(
+            "View submitted requests from this session"
+        ):
+            session_df = pd.DataFrame(
+                st.session_state.shipment_request_records
+            )
+            st.dataframe(
+                session_df,
+                use_container_width=True,
+            )
+
+    render_back_to_home(
+        key="request_shipment_back_to_home"
+    )
 
 
 if __name__ == "__main__":

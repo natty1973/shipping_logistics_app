@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import streamlit as st
 
 
@@ -391,6 +393,44 @@ def apply_custom_styles() -> None:
             transform: translateY(-1px);
         }
 
+        /* Compact green customer receipt buttons */
+        div[class*="st-key-customer_receipt_download"] .stDownloadButton > button {
+            background: linear-gradient(135deg, #0B6E4F 0%, #084C38 100%) !important;
+            color: #FFFFFF !important;
+            border: 1px solid rgba(5, 59, 45, 0.22) !important;
+            border-radius: 10px !important;
+            padding: 0.48rem 0.72rem !important;
+            min-height: 2.35rem !important;
+            font-size: 0.82rem !important;
+            font-weight: 900 !important;
+            box-shadow: 0 6px 14px rgba(11, 110, 79, 0.20) !important;
+            white-space: nowrap !important;
+        }
+
+        div[class*="st-key-customer_receipt_download"] .stDownloadButton > button:hover {
+            background: linear-gradient(135deg, #084C38 0%, #053B2D 100%) !important;
+            color: #FFFFFF !important;
+            transform: translateY(-1px);
+        }
+
+        /* Small bottom-right home button */
+        div[class*="st-key-back_to_home_bar"] .stButton > button {
+            background: #0B6E4F !important;
+            color: #FFFFFF !important;
+            border-radius: 10px !important;
+            padding: 0.48rem 0.72rem !important;
+            font-size: 0.84rem !important;
+            font-weight: 900 !important;
+            min-height: 2.35rem !important;
+            box-shadow: 0 6px 14px rgba(11, 110, 79, 0.18) !important;
+            white-space: nowrap !important;
+        }
+
+        div[class*="st-key-back_to_home_bar"] .stButton > button:hover {
+            background: #084C38 !important;
+            color: #FFFFFF !important;
+        }
+
         a[data-testid="stPageLink-NavLink"] {
             font-weight: 800;
             border-radius: 12px;
@@ -522,6 +562,22 @@ def apply_custom_styles() -> None:
     )
 
 
+def _home_script_path() -> str:
+    """Return the first common Streamlit entrypoint found in the repo root."""
+
+    for candidate in (
+        "app.py",
+        "Home.py",
+        "home.py",
+        "main.py",
+        "streamlit_app.py",
+    ):
+        if Path(candidate).exists():
+            return candidate
+
+    return "app.py"
+
+
 def sidebar_shipping_options() -> None:
     """
     Render shipping options and contact information in the sidebar
@@ -545,6 +601,49 @@ def sidebar_shipping_options() -> None:
         st.markdown("📍 200 Main St Rear")
         st.markdown("City of Orange, NJ 07050")
         st.markdown("☎️ 973-675-4921")
+
+        portal_mode = st.session_state.get("portal_mode")
+
+        if portal_mode in {
+            "customer",
+            "staff",
+            "owner",
+        }:
+            st.divider()
+            st.page_link(
+                _home_script_path(),
+                label="Back to Home",
+                icon="🏠",
+            )
+
+
+def render_back_to_home(
+    key: str = "back_to_home",
+) -> None:
+    """
+    Render a compact bottom-right button that returns to the
+    current portal's default home page through the app entrypoint.
+    """
+
+    st.write("")
+
+    left, right = st.columns(
+        [5.4, 1.35],
+        vertical_alignment="bottom",
+    )
+
+    with right:
+        with st.container(
+            key=f"back_to_home_bar_{key}"
+        ):
+            if st.button(
+                "🏠 Back to Home",
+                key=key,
+                use_container_width=True,
+            ):
+                st.switch_page(
+                    _home_script_path()
+                )
 
 
 def hero(title: str, subtitle: str) -> None:
