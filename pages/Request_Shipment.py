@@ -3913,14 +3913,14 @@ def main() -> None:
                 )
 
         if submitted:
-            # Refresh all non-pricing form details from the visible inputs.
+            # Refresh the current visible non-pricing fields before validation.
             #
-            # The approximate-cost step stores a snapshot in session state.
-            # A customer may complete or correct a contact/address field after
-            # calculating the estimate. The visible field can therefore contain
-            # a value while the older snapshot still contains an empty string.
-            # Synchronising here prevents false "required field" errors without
-            # changing the approved freight calculation.
+            # The estimate stores a snapshot when the customer clicks
+            # "Calculate Approximate Cost." If the customer enters or corrects
+            # Pickup City afterward, the screen can show the city while the
+            # older snapshot still contains a blank value. Synchronising these
+            # fields here prevents that false validation error while preserving
+            # the approved freight and availability calculation.
             pending_request = {
                 **pending_request,
                 "entered_from_portal": portal_label,
