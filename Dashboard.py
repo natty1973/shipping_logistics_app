@@ -589,6 +589,299 @@ def render_new_request_queue(
         )
 
 
+def normalize_phone(
+    value: Any,
+) -> str:
+    """Return telephone digits for driver-login comparison."""
+
+    return re.sub(
+        r"\D",
+        "",
+        str(value or ""),
+    )
+
+
+def authenticate_driver(
+    driver_id: str,
+    phone: str,
+) -> dict[str, Any] | None:
+    """Validate a driver against the active Neon driver directory."""
+
+    cleaned_driver_id = driver_id.strip()
+
+    if not cleaned_driver_id or not phone.strip():
+        return None
+
+    engine = get_database_engine()
+
+    with engine.connect() as connection:
+        driver = connection.execute(
+            text(
+                f"""
+                SELECT
+                    driver_id,
+                    driver_name,
+                    phone,
+                    active_status
+                FROM {DATABASE_SCHEMA}.drivers
+                WHERE UPPER(BTRIM(driver_id)) =
+                    UPPER(BTRIM(:driver_id))
+                LIMIT 1;
+                """
+            ),
+            {
+                "driver_id": cleaned_driver_id
+            },
+        ).mappings().first()
+
+    if driver is None:
+        return None
+
+    active_status = str(
+        driver.get("active_status")
+        or ""
+    ).strip().lower()
+
+    if active_status not in {
+        "active",
+        "backup",
+    }:
+        return None
+
+    stored_phone = normalize_phone(
+        driver.get("phone")
+    )
+
+    entered_phone = normalize_phone(phone)
+
+    if (
+        not stored_phone
+        or stored_phone != entered_phone
+    ):
+        return None
+
+    return dict(driver)
+
+
+def load_driver_home_counts(
+    engine: Engine,
+    driver_id: str,
+) -> dict[str, int]:
+    """Load Driver Home metrics from the assignment table."""
+
+    if not table_exists(
+        engine,
+        "driver_assignments",
+    ):
+        raise RuntimeError(
+            "The driver_assignments table is missing. "
+            "Run the Driver Portal migration."
+        )
+
+    with engine.connect() as connection:
+        result = connection.execute(
+            text(
+                f"""
+                SELECT
+                    COUNT(*) FILTER (
+                        WHERE assignment_status =
+                            'Pending Driver Acceptance'
+                    ) AS awaiting_response,
+
+                    COUNT(*) FILTER (
+                        WHERE assignment_status IN (
+                            'Driver Accepted',
+                            'Driver En Route',
+                            'Driver Arrived'
+                        )
+                    ) AS active_pickups,
+
+                    COUNT(*) FILTER (
+                        WHERE assignment_status =
+                            'Completed'
+                          AND completion_time::DATE =
+                            CURRENT_DATE
+                    ) AS completed_today,
+
+                    COUNT(*) FILTER (
+                        WHERE assignment_status =
+                            'Driver Declined'
+                          AND declined_date >=
+                            CURRENT_DATE
+                            - INTERVAL '30 days'
+                    ) AS declined_recently
+                FROM {DATABASE_SCHEMA}.driver_assignments
+                WHERE driver_id = :driver_id;
+                """
+            ),
+            {
+                "driver_id": driver_id
+            },
+        ).mappings().one()
+
+    return {
+        key: int(value or 0)
+        for key, value in dict(result).items()
+    }
+
+
+def load_driver_activity(
+    engine: Engine,
+) -> pd.DataFrame:
+    """Load the most recent driver responses for Staff and Owner views."""
+
+    if not table_exists(
+        engine,
+        "driver_assignments",
+    ):
+        return pd.DataFrame()
+
+    query = text(
+        f"""
+        SELECT
+            a.assignment_id,
+            a.shipment_id,
+            a.pickup_id,
+            d.driver_name,
+            p.pickup_date,
+            p.pickup_time_window,
+            p.pickup_address,
+            a.assignment_status,
+            a.decline_reason,
+            a.last_status_date
+        FROM {DATABASE_SCHEMA}.driver_assignments AS a
+        JOIN {DATABASE_SCHEMA}.drivers AS d
+            ON d.driver_id = a.driver_id
+        JOIN {DATABASE_SCHEMA}.pickup_schedule AS p
+            ON p.pickup_id = a.pickup_id
+        ORDER BY
+            a.last_status_date DESC NULLS LAST,
+            a.assigned_date DESC
+        LIMIT 20;
+        """
+    )
+
+    with engine.connect() as connection:
+        return pd.read_sql_query(
+            query,
+            connection,
+        )
+
+
+def render_driver_activity(
+    engine: Engine,
+    heading: str = "Driver Assignment Activity",
+) -> None:
+    """Show live driver acceptance and movement updates."""
+
+    activity = load_driver_activity(engine)
+
+    st.subheader(heading)
+
+    if activity.empty:
+        st.info(
+            "No driver assignments have been created yet."
+        )
+        return
+
+    pending = int(
+        activity["assignment_status"]
+        .eq("Pending Driver Acceptance")
+        .sum()
+    )
+
+    active = int(
+        activity["assignment_status"]
+        .isin(
+            [
+                "Driver Accepted",
+                "Driver En Route",
+                "Driver Arrived",
+            ]
+        )
+        .sum()
+    )
+
+    reassign = int(
+        activity["assignment_status"]
+        .isin(
+            [
+                "Driver Declined",
+                "Unable to Complete",
+            ]
+        )
+        .sum()
+    )
+
+    metric_columns = st.columns(3)
+
+    with metric_columns[0]:
+        st.metric(
+            "Awaiting Driver Response",
+            pending,
+        )
+
+    with metric_columns[1]:
+        st.metric(
+            "Active Driver Pickups",
+            active,
+        )
+
+    with metric_columns[2]:
+        st.metric(
+            "Needs Staff Attention",
+            reassign,
+        )
+
+    display = activity.copy()
+
+    display["pickup_date"] = pd.to_datetime(
+        display["pickup_date"],
+        errors="coerce",
+    ).dt.strftime("%b %d, %Y")
+
+    display["last_status_date"] = (
+        pd.to_datetime(
+            display["last_status_date"],
+            errors="coerce",
+        ).dt.strftime(
+            "%b %d, %Y %I:%M %p"
+        )
+    )
+
+    display = display[
+        [
+            "shipment_id",
+            "driver_name",
+            "pickup_date",
+            "pickup_time_window",
+            "assignment_status",
+            "decline_reason",
+            "last_status_date",
+        ]
+    ].rename(
+        columns={
+            "shipment_id": "Shipment ID",
+            "driver_name": "Driver",
+            "pickup_date": "Pickup Date",
+            "pickup_time_window": "Window",
+            "assignment_status": "Driver Status",
+            "decline_reason": "Decline / Issue Reason",
+            "last_status_date": "Last Update",
+        }
+    )
+
+    st.dataframe(
+        display,
+        use_container_width=True,
+        hide_index=True,
+        height=min(
+            480,
+            80 + (len(display) * 35),
+        ),
+    )
+
+
 # ---------------------------------------------------------
 # Session State
 # ---------------------------------------------------------
@@ -600,6 +893,15 @@ if "staff_authenticated" not in st.session_state:
 
 if "owner_authenticated" not in st.session_state:
     st.session_state.owner_authenticated = False
+
+if "driver_authenticated" not in st.session_state:
+    st.session_state.driver_authenticated = False
+
+if "driver_id" not in st.session_state:
+    st.session_state.driver_id = ""
+
+if "driver_name" not in st.session_state:
+    st.session_state.driver_name = ""
 
 
 # ---------------------------------------------------------
@@ -613,6 +915,9 @@ def switch_portal() -> None:
     st.session_state.portal_mode = None
     st.session_state.staff_authenticated = False
     st.session_state.owner_authenticated = False
+    st.session_state.driver_authenticated = False
+    st.session_state.driver_id = ""
+    st.session_state.driver_name = ""
     st.rerun()
 
 
@@ -625,6 +930,9 @@ def enter_customer_portal() -> None:
     st.session_state.portal_mode = "customer"
     st.session_state.staff_authenticated = False
     st.session_state.owner_authenticated = False
+    st.session_state.driver_authenticated = False
+    st.session_state.driver_id = ""
+    st.session_state.driver_name = ""
     st.rerun()
 
 
@@ -636,6 +944,9 @@ def go_to_staff_login() -> None:
     st.session_state.portal_mode = "staff_login"
     st.session_state.staff_authenticated = False
     st.session_state.owner_authenticated = False
+    st.session_state.driver_authenticated = False
+    st.session_state.driver_id = ""
+    st.session_state.driver_name = ""
     st.rerun()
 
 
@@ -647,6 +958,21 @@ def go_to_owner_login() -> None:
     st.session_state.portal_mode = "owner_login"
     st.session_state.staff_authenticated = False
     st.session_state.owner_authenticated = False
+    st.session_state.driver_authenticated = False
+    st.session_state.driver_id = ""
+    st.session_state.driver_name = ""
+    st.rerun()
+
+
+def go_to_driver_login() -> None:
+    """Send the user to the Driver login screen."""
+
+    st.session_state.portal_mode = "driver_login"
+    st.session_state.staff_authenticated = False
+    st.session_state.owner_authenticated = False
+    st.session_state.driver_authenticated = False
+    st.session_state.driver_id = ""
+    st.session_state.driver_name = ""
     st.rerun()
 
 
@@ -702,25 +1028,22 @@ def render_small_back_button(key: str) -> None:
 # Portal Selection Page
 # ---------------------------------------------------------
 def portal_selection_page() -> None:
-    """
-    First screen users see.
-    Users choose Customer, Staff, or Owner access.
-    """
+    """Let Customer, Driver, Staff, or Owner choose the correct portal."""
 
     apply_custom_styles()
 
     hero(
         title="Solomon Shipping and Trading Inc.",
         subtitle=(
-            "Express deliveries weekly with fast, reliable, and flexible shipping options by air and sea. "
-            "Choose the portal that matches how you want to use the platform."
+            "Express deliveries weekly with reliable air and sea shipping. "
+            "Choose the portal that matches your role."
         ),
     )
 
     st.markdown(
         """
         <span class="badge-green">Air & Sea Shipping</span>
-        <span class="badge-dark">Fast Tracking</span>
+        <span class="badge-dark">Live Pickup Operations</span>
         <span class="badge-red">Reliable Delivery</span>
         """,
         unsafe_allow_html=True,
@@ -729,97 +1052,107 @@ def portal_selection_page() -> None:
     st.write("")
     st.subheader("Select Your Portal")
 
-    col1, col2, col3 = st.columns(3)
+    first_left, first_right = st.columns(2)
 
-    with col1:
+    with first_left:
         with st.container(border=True):
             st.markdown("## 👤 Customer Portal")
             st.write(
-                "Request a shipment, manage shipment changes, check shipment status, "
-                "review your payment, and contact support."
+                "Request a shipment, manage changes, track status, "
+                "review payment information, and contact support."
             )
 
-            st.markdown(
-                """
-                Best for customers who want to:
-                - Request shipping service
-                - Track a package
-                - Request pickup changes or cancellation
-                - Check payment status
-                - Contact Solomon Shipping support
-                """
-            )
-
-            if st.button("Enter Customer Portal", use_container_width=True):
+            if st.button(
+                "Enter Customer Portal",
+                use_container_width=True,
+                key="customer_portal_entry",
+            ):
                 enter_customer_portal()
 
-    with col2:
+    with first_right:
+        with st.container(border=True):
+            st.markdown("## 🚚 Driver Portal")
+            st.write(
+                "View only the pickups assigned to you, accept or decline "
+                "new work, open directions, and send live progress updates."
+            )
+
+            if st.button(
+                "Driver Login",
+                use_container_width=True,
+                key="driver_portal_entry",
+            ):
+                go_to_driver_login()
+
+    second_left, second_right = st.columns(2)
+
+    with second_left:
         with st.container(border=True):
             st.markdown("## 🛠️ Staff Portal")
             st.write(
-                "Secure access for staff to support customers and manage day-to-day shipment operations."
+                "Review customer requests, confirm two-hour pickup windows, "
+                "assign drivers, and manage day-to-day operations."
             )
 
-            st.markdown(
-                """
-                Staff access includes:
-                - Enter shipment requests for customers
-                - Schedule pickups
-                - Check shipment status
-                - Help customers with payment lookup
-                - Contact/support workflow
-                """
-            )
-
-            if st.button("Staff Login", use_container_width=True):
+            if st.button(
+                "Staff Login",
+                use_container_width=True,
+                key="staff_portal_entry",
+            ):
                 go_to_staff_login()
 
-    with col3:
+    with second_right:
         with st.container(border=True):
             st.markdown("## 👑 Owner Portal")
             st.write(
-                "Private owner access for company-wide financials, reports, and AI-powered business insights."
+                "Perform all operational functions while also reviewing "
+                "payments, reports, financial metrics, and AI insights."
             )
 
-            st.markdown(
-                """
-                Owner access includes:
-                - Revenue and balances
-                - Full payments dashboard
-                - Reports
-                - AI assistant
-                - Business performance metrics
-                """
-            )
-
-            if st.button("Owner Login", use_container_width=True):
+            if st.button(
+                "Owner Login",
+                use_container_width=True,
+                key="owner_portal_entry",
+            ):
                 go_to_owner_login()
 
     st.divider()
-
     st.subheader("Our Shipping Options")
 
-    ship_col1, ship_col2, ship_col3, ship_col4 = st.columns(4)
+    option_columns = st.columns(4)
 
-    with ship_col1:
-        with st.container(border=True):
-            st.markdown("### ✈️ Express Air")
-            st.write("3–5 business days")
+    shipping_options = [
+        (
+            "✈️ Express Air",
+            "3–5 business days",
+        ),
+        (
+            "✈️ Standard Air",
+            "7–10 business days",
+        ),
+        (
+            "🚢 Express Sea",
+            "Approx. 3 weeks",
+        ),
+        (
+            "🚢 Standard Sea",
+            "4–6 weeks",
+        ),
+    ]
 
-    with ship_col2:
-        with st.container(border=True):
-            st.markdown("### ✈️ Standard Air")
-            st.write("7–10 business days")
-
-    with ship_col3:
-        with st.container(border=True):
-            st.markdown("### 🚢 Express Sea")
-            st.write("Approx. 3 weeks")
-
-    with ship_col4:
-        with st.container(border=True):
-            st.markdown("### 🚢 Standard Sea")
-            st.write("4–6 weeks")
+    for column, (
+        title,
+        description,
+    ) in zip(
+        option_columns,
+        shipping_options,
+    ):
+        with column:
+            with st.container(border=True):
+                st.markdown(
+                    f"### {title}"
+                )
+                st.write(description)
 
 
 # ---------------------------------------------------------
@@ -871,12 +1204,121 @@ def staff_login_page() -> None:
                     st.session_state.portal_mode = "staff"
                     st.session_state.staff_authenticated = True
                     st.session_state.owner_authenticated = False
+                    st.session_state.driver_authenticated = False
+                    st.session_state.driver_id = ""
+                    st.session_state.driver_name = ""
                     st.success("Login successful. Opening Staff Portal...")
                     st.rerun()
                 else:
                     st.error("Invalid username or password. Please try again.")
 
     render_small_back_button("staff_login_back_button")
+
+
+def driver_login_page() -> None:
+    """Driver login using the Driver ID and telephone number on file."""
+
+    apply_custom_styles()
+
+    hero(
+        title="Driver Login",
+        subtitle=(
+            "Sign in to review only your assigned Solomon Shipping pickups "
+            "and send live acceptance, route, arrival, and pickup updates."
+        ),
+    )
+
+    st.markdown(
+        """
+        <span class="badge-dark">Driver Access</span>
+        <span class="badge-green">Assigned Pickups Only</span>
+        <span class="badge-red">Live Status Updates</span>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.write("")
+
+    left, center, right = st.columns(
+        [1, 1.4, 1]
+    )
+
+    with center:
+        with st.container(border=True):
+            st.markdown(
+                "### 🔐 Sign in to Driver Portal"
+            )
+
+            with st.form(
+                "driver_login_form"
+            ):
+                driver_id = st.text_input(
+                    "Driver ID"
+                )
+
+                phone = st.text_input(
+                    "Telephone Number"
+                )
+
+                submitted = (
+                    st.form_submit_button(
+                        "Login",
+                        use_container_width=True,
+                    )
+                )
+
+            if submitted:
+                try:
+                    driver = authenticate_driver(
+                        driver_id,
+                        phone,
+                    )
+
+                except Exception as exc:
+                    st.error(
+                        "Driver login could not reach Neon."
+                    )
+                    st.caption(
+                        "Technical details: "
+                        f"{type(exc).__name__}: "
+                        f"{safe_error_message(exc)}"
+                    )
+
+                else:
+                    if driver is None:
+                        st.error(
+                            "The Driver ID and telephone number "
+                            "do not match an active driver record."
+                        )
+
+                    else:
+                        st.session_state.portal_mode = (
+                            "driver"
+                        )
+                        st.session_state.driver_authenticated = (
+                            True
+                        )
+                        st.session_state.driver_id = str(
+                            driver["driver_id"]
+                        ).strip()
+                        st.session_state.driver_name = str(
+                            driver["driver_name"]
+                        ).strip()
+                        st.session_state.staff_authenticated = (
+                            False
+                        )
+                        st.session_state.owner_authenticated = (
+                            False
+                        )
+
+                        st.success(
+                            "Login successful. Opening Driver Portal..."
+                        )
+                        st.rerun()
+
+    render_small_back_button(
+        "driver_login_back_button"
+    )
 
 
 def owner_login_page() -> None:
@@ -925,6 +1367,9 @@ def owner_login_page() -> None:
                     st.session_state.portal_mode = "owner"
                     st.session_state.owner_authenticated = True
                     st.session_state.staff_authenticated = False
+                    st.session_state.driver_authenticated = False
+                    st.session_state.driver_id = ""
+                    st.session_state.driver_name = ""
                     st.success("Login successful. Opening Owner Portal...")
                     st.rerun()
                 else:
@@ -1030,6 +1475,134 @@ def customer_home_page() -> None:
 
 
 # ---------------------------------------------------------
+# Driver Home Page
+# ---------------------------------------------------------
+def driver_home_page() -> None:
+    """Driver landing page with live assignment totals."""
+
+    apply_custom_styles()
+    sidebar_shipping_options()
+
+    driver_id = str(
+        st.session_state.get(
+            "driver_id",
+            "",
+        )
+    ).strip()
+
+    driver_name = str(
+        st.session_state.get(
+            "driver_name",
+            "Driver",
+        )
+    ).strip() or "Driver"
+
+    hero(
+        title=f"Driver Home — {driver_name}",
+        subtitle=(
+            "Review new assignments, accept or decline work, "
+            "open directions, and update live pickup progress."
+        ),
+    )
+
+    st.markdown(
+        """
+        <span class="badge-green">Assigned Pickups</span>
+        <span class="badge-dark">Driver Response</span>
+        <span class="badge-red">Live Customer Updates</span>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.write("")
+
+    try:
+        engine = get_database_engine()
+        counts = load_driver_home_counts(
+            engine,
+            driver_id,
+        )
+
+        metric_columns = st.columns(4)
+
+        metric_values = [
+            (
+                "Awaiting Response",
+                counts["awaiting_response"],
+            ),
+            (
+                "Active Pickups",
+                counts["active_pickups"],
+            ),
+            (
+                "Completed Today",
+                counts["completed_today"],
+            ),
+            (
+                "Declined — 30 Days",
+                counts["declined_recently"],
+            ),
+        ]
+
+        for column, (
+            label,
+            value,
+        ) in zip(
+            metric_columns,
+            metric_values,
+        ):
+            with column:
+                st.metric(
+                    label,
+                    value,
+                )
+
+    except Exception as exc:
+        st.error(
+            "Driver totals could not be loaded from Neon."
+        )
+        st.caption(
+            "Technical details: "
+            f"{type(exc).__name__}: "
+            f"{safe_error_message(exc)}"
+        )
+
+    st.write("")
+
+    left, right = st.columns(2)
+
+    with left:
+        with st.container(border=True):
+            st.markdown(
+                "### 🚚 My Assignments"
+            )
+            st.write(
+                "Accept or decline new assignments and update "
+                "En Route, Arrived, or Picked Up status."
+            )
+            st.page_link(
+                "pages/Driver_Portal.py",
+                label="Open My Assignments",
+                icon="➡️",
+            )
+
+    with right:
+        with st.container(border=True):
+            st.markdown(
+                "### 📦 Status Sharing"
+            )
+            st.write(
+                "Every driver update is saved to Neon and appears "
+                "for Staff, Owner, and Customer Shipment Status."
+            )
+
+    st.info(
+        "Drivers can only view pickups assigned to their own Driver ID. "
+        "Payment and company financial information are not available here."
+    )
+
+
+# ---------------------------------------------------------
 # Staff Home Page
 # ---------------------------------------------------------
 def staff_home_page() -> None:
@@ -1064,6 +1637,13 @@ def staff_home_page() -> None:
         render_new_request_queue(
             engine,
             heading="New Requests and Pickup Queue",
+        )
+
+        st.divider()
+
+        render_driver_activity(
+            engine,
+            heading="Live Driver Responses",
         )
 
     except Exception as exc:
@@ -1267,6 +1847,13 @@ def owner_command_center_page() -> None:
 
     st.divider()
 
+    render_driver_activity(
+        engine,
+        heading="Company Driver Activity",
+    )
+
+    st.divider()
+
     operations_pathway()
 
 
@@ -1315,6 +1902,20 @@ contact_support = st.Page(
     title="Contact Support",
     icon="☎️",
 )
+
+driver_home = st.Page(
+    driver_home_page,
+    title="Driver Home",
+    icon="🏠",
+    default=True,
+)
+
+driver_assignments = st.Page(
+    "pages/Driver_Portal.py",
+    title="My Assignments",
+    icon="🚚",
+)
+
 
 staff_home = st.Page(
     staff_home_page,
@@ -1380,6 +1981,18 @@ if st.session_state.portal_mode is None:
         ]
     )
 
+elif st.session_state.portal_mode == "driver_login":
+    navigation = st.navigation(
+        [
+            st.Page(
+                driver_login_page,
+                title="Driver Login",
+                icon="🔐",
+                default=True,
+            )
+        ]
+    )
+
 elif st.session_state.portal_mode == "staff_login":
     navigation = st.navigation(
         [
@@ -1416,6 +2029,20 @@ elif st.session_state.portal_mode == "customer":
             shipment_status,
             my_payments,
             contact_support,
+        ]
+    )
+
+elif (
+    st.session_state.portal_mode == "driver"
+    and st.session_state.driver_authenticated
+):
+    configure_portal_home_page(driver_home)
+    render_back_to_portal_button()
+
+    navigation = st.navigation(
+        [
+            driver_home,
+            driver_assignments,
         ]
     )
 

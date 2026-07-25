@@ -26,9 +26,12 @@ PICKUP_STATUSES = [
     "Pending Confirmation",
     "Scheduled",
     "Rescheduled",
-    "Driver Assigned",
-    "On the Way",
-    "Arrived",
+    "Pending Driver Acceptance",
+    "Driver Accepted",
+    "Driver En Route",
+    "Driver Arrived",
+    "Driver Declined — Reassignment Needed",
+    "Pickup Issue — Staff Review",
     "Picked Up",
     "Completed",
     "Cancelled",
@@ -52,9 +55,10 @@ NEW_PICKUP_STATUSES = {
 SCHEDULED_PICKUP_STATUSES = {
     "scheduled",
     "rescheduled",
-    "driver assigned",
-    "on the way",
-    "arrived",
+    "pending driver acceptance",
+    "driver accepted",
+    "driver en route",
+    "driver arrived",
 }
 
 CLOSED_PICKUP_STATUSES = {
@@ -248,6 +252,7 @@ def verify_tables(
         "shipments",
         "pickup_schedule",
         "drivers",
+        "driver_assignments",
         "pickup_capacity",
         "shipment_change_history",
         "status_history",
@@ -881,10 +886,10 @@ def save_pickup(
     notes: str,
 ) -> str:
     """
-    Update an existing pickup or create the pickup row for a shipment request.
+    Create or update a pickup and send a new assignment to the Driver Portal.
 
-    Returning the Pickup ID makes the operation explicit and supports requests
-    that were saved in shipments but did not receive a pickup_schedule row.
+    A newly selected driver receives Pending Driver Acceptance. Reassignment
+    closes the previous active assignment while preserving its history.
     """
 
     pickup_id = clean(
@@ -904,6 +909,11 @@ def save_pickup(
 
     customer_name = clean(
         record.get("customer_name"),
+        "",
+    )
+
+    previous_driver_id = clean(
+        record.get("driver_id"),
         "",
     )
 
@@ -945,18 +955,9 @@ def save_pickup(
         entry,
     )
 
-    shipment_status = {
-        "Scheduled": "Pickup Scheduled",
-        "Rescheduled": "Pickup Scheduled",
-        "Driver Assigned": "Pickup Scheduled",
-        "Picked Up": "Picked Up",
-        "Completed": "Picked Up",
-        "Cancelled": "Cancelled",
-    }.get(status)
-
     with engine.begin() as connection:
         if driver_id:
-            conflicting_pickup = connection.execute(
+            conflict = connection.execute(
                 text(
                     f"""
                     SELECT
@@ -979,7 +980,8 @@ def save_pickup(
                             'cancelled',
                             'completed',
                             'picked up',
-                            'no show'
+                            'no show',
+                            'driver declined — reassignment needed'
                         )
                         AND (
                             :pickup_id = ''
@@ -996,12 +998,75 @@ def save_pickup(
                 },
             ).mappings().first()
 
-            if conflicting_pickup is not None:
+            if conflict is not None:
                 raise RuntimeError(
                     "The selected driver already has a pickup "
                     "during this two-hour window. Choose another "
-                    "driver or another available time."
+                    "driver or another time."
                 )
+
+        driver_changed = (
+            previous_driver_id != driver_id
+        )
+
+        active_assignment = None
+
+        if pickup_id and driver_id:
+            active_assignment = connection.execute(
+                text(
+                    f"""
+                    SELECT
+                        assignment_id,
+                        assignment_status
+                    FROM {SCHEMA}.driver_assignments
+                    WHERE
+                        pickup_id = :pickup_id
+                        AND driver_id = :driver_id
+                        AND assignment_status IN (
+                            'Pending Driver Acceptance',
+                            'Driver Accepted',
+                            'Driver En Route',
+                            'Driver Arrived'
+                        )
+                    ORDER BY assigned_date DESC
+                    LIMIT 1;
+                    """
+                ),
+                {
+                    "pickup_id": pickup_id,
+                    "driver_id": driver_id,
+                },
+            ).mappings().first()
+
+        new_assignment_needed = bool(
+            driver_id
+            and (
+                driver_changed
+                or active_assignment is None
+            )
+        )
+
+        effective_status = status
+
+        if new_assignment_needed:
+            effective_status = (
+                "Pending Driver Acceptance"
+            )
+
+        elif (
+            driver_id
+            and active_assignment is not None
+            and clean(
+                active_assignment.get(
+                    "assignment_status"
+                ),
+                "",
+            )
+            == "Pending Driver Acceptance"
+        ):
+            effective_status = (
+                "Pending Driver Acceptance"
+            )
 
         if pickup_id:
             updated = connection.execute(
@@ -1023,8 +1088,7 @@ def save_pickup(
                         notes = :notes,
                         updated_at =
                             CURRENT_TIMESTAMP
-                    WHERE
-                        pickup_id = :pickup_id
+                    WHERE pickup_id = :pickup_id;
                     """
                 ),
                 {
@@ -1033,7 +1097,7 @@ def save_pickup(
                     "pickup_address": address,
                     "driver_id": driver_id,
                     "assigned_staff": dispatcher,
-                    "pickup_status": status,
+                    "pickup_status": effective_status,
                     "notes": updated_notes,
                     "pickup_id": pickup_id,
                 },
@@ -1082,7 +1146,7 @@ def save_pickup(
                         NULLIF(:driver_id, ''),
                         CURRENT_TIMESTAMP,
                         CURRENT_TIMESTAMP
-                    )
+                    );
                     """
                 ),
                 {
@@ -1094,66 +1158,227 @@ def save_pickup(
                     "pickup_time_window": window,
                     "pickup_address": address,
                     "assigned_staff": dispatcher,
-                    "pickup_status": status,
+                    "pickup_status": effective_status,
                     "notes": updated_notes,
                     "driver_id": driver_id,
                 },
             )
 
-        if shipment_status:
-            current = connection.execute(
+            if driver_id:
+                new_assignment_needed = True
+
+        if previous_driver_id and previous_driver_id != driver_id:
+            connection.execute(
                 text(
                     f"""
-                    SELECT
-                        current_status
-                    FROM {SCHEMA}.shipments
+                    UPDATE {SCHEMA}.driver_assignments
+                    SET
+                        assignment_status = 'Reassigned',
+                        driver_notes = CASE
+                            WHEN driver_notes IS NULL
+                                 OR BTRIM(driver_notes) = ''
+                                THEN :note
+                            ELSE driver_notes
+                                || E'\n\n'
+                                || :note
+                        END,
+                        last_status_date =
+                            CURRENT_TIMESTAMP,
+                        completion_time = COALESCE(
+                            completion_time,
+                            CURRENT_TIMESTAMP
+                        ),
+                        updated_at =
+                            CURRENT_TIMESTAMP
                     WHERE
-                        shipment_id =
-                            :shipment_id
-                    FOR UPDATE
+                        pickup_id = :pickup_id
+                        AND assignment_status IN (
+                            'Pending Driver Acceptance',
+                            'Driver Accepted',
+                            'Driver En Route',
+                            'Driver Arrived'
+                        );
                     """
                 ),
                 {
-                    "shipment_id": shipment_id
+                    "note": (
+                        "Assignment changed by "
+                        f"{dispatcher}."
+                    ),
+                    "pickup_id": pickup_id,
                 },
-            ).scalar_one_or_none()
+            )
 
-            if current != shipment_status:
-                connection.execute(
-                    text(
-                        f"""
-                        UPDATE {SCHEMA}.shipments
-                        SET
-                            current_status =
-                                :status,
-                            updated_at =
-                                CURRENT_TIMESTAMP
-                        WHERE
-                            shipment_id =
-                                :shipment_id
-                        """
+        elif previous_driver_id and not driver_id:
+            connection.execute(
+                text(
+                    f"""
+                    UPDATE {SCHEMA}.driver_assignments
+                    SET
+                        assignment_status =
+                            'Assignment Removed',
+                        driver_notes = CASE
+                            WHEN driver_notes IS NULL
+                                 OR BTRIM(driver_notes) = ''
+                                THEN :note
+                            ELSE driver_notes
+                                || E'\n\n'
+                                || :note
+                        END,
+                        last_status_date =
+                            CURRENT_TIMESTAMP,
+                        completion_time = COALESCE(
+                            completion_time,
+                            CURRENT_TIMESTAMP
+                        ),
+                        updated_at =
+                            CURRENT_TIMESTAMP
+                    WHERE
+                        pickup_id = :pickup_id
+                        AND assignment_status IN (
+                            'Pending Driver Acceptance',
+                            'Driver Accepted',
+                            'Driver En Route',
+                            'Driver Arrived'
+                        );
+                    """
+                ),
+                {
+                    "note": (
+                        "Driver removed by "
+                        f"{dispatcher}."
                     ),
-                    {
-                        "status": shipment_status,
-                        "shipment_id": shipment_id,
-                    },
-                )
+                    "pickup_id": pickup_id,
+                },
+            )
 
-                add_status(
-                    connection,
-                    shipment_id,
-                    shipment_status,
-                    dispatcher,
-                    (
-                        "Updated from the "
-                        "Schedule Pickup page."
+        if new_assignment_needed and driver_id:
+            connection.execute(
+                text(
+                    f"""
+                    INSERT INTO {SCHEMA}.driver_assignments (
+                        assignment_id,
+                        pickup_id,
+                        shipment_id,
+                        driver_id,
+                        assigned_by,
+                        assigned_role,
+                        assigned_date,
+                        assignment_status,
+                        driver_notes,
+                        last_status_date,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (
+                        :assignment_id,
+                        :pickup_id,
+                        :shipment_id,
+                        :driver_id,
+                        :assigned_by,
+                        :assigned_role,
+                        CURRENT_TIMESTAMP,
+                        'Pending Driver Acceptance',
+                        :driver_notes,
+                        CURRENT_TIMESTAMP,
+                        CURRENT_TIMESTAMP,
+                        CURRENT_TIMESTAMP
+                    );
+                    """
+                ),
+                {
+                    "assignment_id": (
+                        "ASSIGN-"
+                        + uuid4().hex[:24].upper()
                     ),
-                )
+                    "pickup_id": pickup_id,
+                    "shipment_id": shipment_id,
+                    "driver_id": driver_id,
+                    "assigned_by": dispatcher,
+                    "assigned_role": portal_role(),
+                    "driver_notes": (
+                        "New assignment sent to "
+                        "the Driver Portal."
+                    ),
+                },
+            )
 
-        if status in {
+        shipment_status = {
+            "Pending Confirmation": (
+                "Request Received"
+            ),
+            "Scheduled": "Pickup Scheduled",
+            "Rescheduled": "Pickup Scheduled",
+            "Pending Driver Acceptance": (
+                "Driver Assigned — Awaiting Acceptance"
+            ),
+            "Driver Accepted": "Driver Accepted",
+            "Driver En Route": "Driver En Route",
+            "Driver Arrived": "Driver Arrived",
+            "Driver Declined — Reassignment Needed": (
+                "Driver Reassignment Needed"
+            ),
+            "Pickup Issue — Staff Review": (
+                "Pickup Issue — Staff Review"
+            ),
+            "Picked Up": "Picked Up",
+            "Completed": "Picked Up",
+            "Cancelled": "Cancelled",
+            "No Show": "Pickup No Show",
+        }.get(
+            effective_status,
+            "Pickup Scheduled",
+        )
+
+        current_status = connection.execute(
+            text(
+                f"""
+                SELECT current_status
+                FROM {SCHEMA}.shipments
+                WHERE shipment_id = :shipment_id
+                FOR UPDATE;
+                """
+            ),
+            {
+                "shipment_id": shipment_id
+            },
+        ).scalar_one_or_none()
+
+        if current_status != shipment_status:
+            connection.execute(
+                text(
+                    f"""
+                    UPDATE {SCHEMA}.shipments
+                    SET
+                        current_status = :status,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE shipment_id = :shipment_id;
+                    """
+                ),
+                {
+                    "status": shipment_status,
+                    "shipment_id": shipment_id,
+                },
+            )
+
+            add_status(
+                connection,
+                shipment_id,
+                shipment_status,
+                dispatcher,
+                (
+                    "Updated from the "
+                    "Schedule Pickup page."
+                ),
+            )
+
+        if effective_status in {
             "Scheduled",
             "Rescheduled",
-            "Driver Assigned",
+            "Pending Driver Acceptance",
+            "Driver Accepted",
+            "Driver En Route",
+            "Driver Arrived",
         }:
             mark_milestone(
                 connection,
@@ -1162,7 +1387,7 @@ def save_pickup(
                 dispatcher,
             )
 
-        elif status in {
+        elif effective_status in {
             "Picked Up",
             "Completed",
         }:
@@ -1980,7 +2205,7 @@ def render_pickup_management_form(
 
             with right:
                 selected_driver = st.selectbox(
-                    "Assign Driver",
+                    "Assign Driver — Driver Must Accept",
                     driver_ids,
                     index=(
                         driver_ids.index(
@@ -2074,7 +2299,9 @@ def render_pickup_management_form(
 
                 st.success(
                     "Pickup update saved to Neon. "
-                    f"Pickup ID: {saved_pickup_id}"
+                    f"Pickup ID: {saved_pickup_id}. "
+                    "A newly assigned driver will see it "
+                    "in the Driver Portal for acceptance."
                 )
 
                 st.rerun()
