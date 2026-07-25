@@ -3913,6 +3913,44 @@ def main() -> None:
                 )
 
         if submitted:
+            # Refresh all non-pricing form details from the visible inputs.
+            #
+            # The approximate-cost step stores a snapshot in session state.
+            # A customer may complete or correct a contact/address field after
+            # calculating the estimate. The visible field can therefore contain
+            # a value while the older snapshot still contains an empty string.
+            # Synchronising here prevents false "required field" errors without
+            # changing the approved freight calculation.
+            pending_request = {
+                **pending_request,
+                "entered_from_portal": portal_label,
+                "requested_by": (
+                    requested_by.strip()
+                    or portal_label
+                ),
+                "customer_name": customer_name.strip(),
+                "phone": phone.strip(),
+                "email": email.strip(),
+                "customer_type": customer_type,
+                "preferred_contact": preferred_contact,
+                "pickup_address": pickup_address.strip(),
+                "pickup_city": pickup_city.strip(),
+                "pickup_state": pickup_state.strip(),
+                "pickup_zip": pickup_zip.strip(),
+                "pickup_flexibility": pickup_flexibility,
+                "pickup_notes": pickup_notes.strip(),
+                "destination_city": destination_city.strip(),
+                "recipient_name": recipient_name.strip(),
+                "recipient_phone": recipient_phone.strip(),
+                "shipment_notes": shipment_notes.strip(),
+                "payment_terms": payment_terms,
+                "payment_notes": payment_notes.strip(),
+            }
+
+            st.session_state.pending_shipment_request = (
+                pending_request
+            )
+
             required_fields = {
                 "Full Name": pending_request[
                     "customer_name"
