@@ -34,12 +34,19 @@ PENDING_STATUSES = {
 ACTIVE_STATUSES = {
     "Driver Accepted",
     "Driver En Route",
+    "Driver Delayed",
     "Driver Arrived",
+    "Waiting for Customer",
 }
 
 HISTORY_STATUSES = {
     "Completed",
     "Driver Declined",
+    "Customer Requested Reschedule",
+    "Customer Not Ready",
+    "Address Issue",
+    "Unable to Access",
+    "Vehicle Issue",
     "Unable to Complete",
     "Reassigned",
     "Assignment Removed",
@@ -224,7 +231,7 @@ def verify_access() -> tuple[str, str]:
         )
         st.info(
             "Return to Portal Selection and sign in "
-            "with your Driver ID and telephone number."
+            "with the Driver Portal username and password."
         )
         st.stop()
 
@@ -243,6 +250,7 @@ def verify_tables(
         "shipments",
         "customers",
         "status_history",
+        "pickup_messages",
     ]
 
     missing: list[str] = []
@@ -401,6 +409,183 @@ def load_assignments(
     return frame
 
 
+def load_pickup_messages(
+    engine: Engine,
+    pickup_id: str,
+) -> pd.DataFrame:
+    """Load the driver/customer conversation for one pickup."""
+
+    query = text(
+        f"""
+        SELECT
+            message_id,
+            shipment_id,
+            pickup_id,
+            sender_role,
+            sender_id,
+            sender_name,
+            recipient_role,
+            message_type,
+            message_text,
+            created_at,
+            read_at
+        FROM {SCHEMA}.pickup_messages
+        WHERE pickup_id = :pickup_id
+        ORDER BY created_at ASC, message_id ASC;
+        """
+    )
+
+    with engine.connect() as connection:
+        return pd.read_sql_query(
+            query,
+            connection,
+            params={
+                "pickup_id": pickup_id
+            },
+        )
+
+
+def insert_pickup_message(
+    connection: Any,
+    *,
+    shipment_id: str,
+    pickup_id: str,
+    sender_role: str,
+    sender_id: str,
+    sender_name: str,
+    recipient_role: str,
+    message_type: str,
+    message_text: str,
+) -> str:
+    """Insert one message using an existing database transaction."""
+
+    clean_message = message_text.strip()
+
+    if not clean_message:
+        raise RuntimeError(
+            "The message cannot be blank."
+        )
+
+    message_id = (
+        "MSG-"
+        + uuid4().hex[:24].upper()
+    )
+
+    connection.execute(
+        text(
+            f"""
+            INSERT INTO {SCHEMA}.pickup_messages (
+                message_id,
+                shipment_id,
+                pickup_id,
+                sender_role,
+                sender_id,
+                sender_name,
+                recipient_role,
+                message_type,
+                message_text,
+                created_at
+            )
+            VALUES (
+                :message_id,
+                :shipment_id,
+                :pickup_id,
+                :sender_role,
+                NULLIF(:sender_id, ''),
+                :sender_name,
+                :recipient_role,
+                :message_type,
+                :message_text,
+                CURRENT_TIMESTAMP
+            );
+            """
+        ),
+        {
+            "message_id": message_id,
+            "shipment_id": shipment_id,
+            "pickup_id": pickup_id,
+            "sender_role": sender_role,
+            "sender_id": sender_id,
+            "sender_name": sender_name,
+            "recipient_role": recipient_role,
+            "message_type": message_type,
+            "message_text": clean_message,
+        },
+    )
+
+    return message_id
+
+
+def send_driver_message(
+    engine: Engine,
+    *,
+    shipment_id: str,
+    pickup_id: str,
+    driver_id: str,
+    driver_name: str,
+    message_text: str,
+    message_type: str = "Driver Message",
+) -> str:
+    """
+    Send an in-app message to the customer and preserve it in status history.
+
+    The same pickup_messages table can be used by the Customer Portal for
+    replies, creating a true two-way conversation without exposing financial
+    information to the driver.
+    """
+
+    with engine.begin() as connection:
+        message_id = insert_pickup_message(
+            connection,
+            shipment_id=shipment_id,
+            pickup_id=pickup_id,
+            sender_role="Driver",
+            sender_id=driver_id,
+            sender_name=driver_name or driver_id,
+            recipient_role="Customer",
+            message_type=message_type,
+            message_text=message_text,
+        )
+
+        add_status_history(
+            connection,
+            shipment_id,
+            "Driver Message",
+            driver_name or driver_id,
+            message_text.strip(),
+        )
+
+        connection.execute(
+            text(
+                f"""
+                UPDATE {SCHEMA}.pickup_schedule
+                SET
+                    notes = CASE
+                        WHEN notes IS NULL
+                             OR BTRIM(notes) = ''
+                            THEN :note
+                        ELSE notes
+                            || E'\n\n'
+                            || :note
+                    END,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE pickup_id = :pickup_id;
+                """
+            ),
+            {
+                "note": (
+                    "[Driver message to customer] "
+                    + message_text.strip()
+                ),
+                "pickup_id": pickup_id,
+            },
+        )
+
+    return message_id
+
+
+
+
 def add_status_history(
     connection: Any,
     shipment_id: str,
@@ -497,10 +682,11 @@ def update_assignment(
     decline_reason: str = "",
 ) -> str:
     """
-    Apply a driver action transactionally.
+    Apply one detailed driver action transactionally.
 
-    Every driver action updates the assignment, pickup, shipment, and customer
-    status history so the Driver, Staff, Owner, and Customer views remain aligned.
+    Driver actions update driver_assignments, pickup_schedule, shipments,
+    status_history, and the customer message thread together so Driver, Staff,
+    Owner, and Customer views remain aligned.
     """
 
     action_map = {
@@ -512,6 +698,10 @@ def update_assignment(
             "pickup_status": "Driver Accepted",
             "shipment_status": "Driver Accepted",
             "timestamp_column": "accepted_date",
+            "release_driver": False,
+            "customer_message": (
+                "Your driver accepted the pickup assignment."
+            ),
         },
         "Decline Assignment": {
             "allowed": {
@@ -525,39 +715,206 @@ def update_assignment(
                 "Driver Reassignment Needed"
             ),
             "timestamp_column": "declined_date",
+            "release_driver": True,
+            "customer_message": (
+                "Solomon Shipping is reassigning your pickup driver."
+            ),
         },
         "Start Route": {
             "allowed": {
-                "Driver Accepted"
+                "Driver Accepted",
+                "Driver Delayed",
             },
             "assignment_status": "Driver En Route",
             "pickup_status": "Driver En Route",
             "shipment_status": "Driver En Route",
             "timestamp_column": "en_route_time",
+            "release_driver": False,
+            "customer_message": (
+                "Your Solomon Shipping driver is on the way."
+            ),
+        },
+        "Traffic Delay": {
+            "allowed": {
+                "Driver En Route",
+                "Driver Delayed",
+            },
+            "assignment_status": "Driver Delayed",
+            "pickup_status": "Driver Delayed — Traffic",
+            "shipment_status": "Driver Delayed — Traffic",
+            "timestamp_column": None,
+            "release_driver": False,
+            "customer_message": (
+                "Your driver is delayed by traffic but is still on the way."
+            ),
         },
         "Mark Arrived": {
             "allowed": {
-                "Driver En Route"
+                "Driver En Route",
+                "Driver Delayed",
             },
             "assignment_status": "Driver Arrived",
             "pickup_status": "Driver Arrived",
             "shipment_status": "Driver Arrived",
             "timestamp_column": "arrival_time",
+            "release_driver": False,
+            "customer_message": (
+                "Your Solomon Shipping driver has arrived."
+            ),
+        },
+        "Ring Bell — No Answer": {
+            "allowed": {
+                "Driver Arrived",
+                "Waiting for Customer",
+            },
+            "assignment_status": "Waiting for Customer",
+            "pickup_status": "Driver Waiting — No Answer",
+            "shipment_status": "Driver Waiting — No Answer",
+            "timestamp_column": None,
+            "release_driver": False,
+            "customer_message": (
+                "Your driver arrived and rang the bell, "
+                "but did not receive an answer. Please contact the driver."
+            ),
+        },
+        "Customer Contacted — Waiting": {
+            "allowed": {
+                "Driver Arrived",
+                "Waiting for Customer",
+            },
+            "assignment_status": "Waiting for Customer",
+            "pickup_status": "Driver Waiting for Customer",
+            "shipment_status": "Driver Waiting for Customer",
+            "timestamp_column": None,
+            "release_driver": False,
+            "customer_message": (
+                "Your driver is at the pickup location and waiting."
+            ),
         },
         "Confirm Picked Up": {
             "allowed": {
-                "Driver Arrived"
+                "Driver Arrived",
+                "Waiting for Customer",
             },
             "assignment_status": "Completed",
             "pickup_status": "Picked Up",
             "shipment_status": "Picked Up",
             "timestamp_column": "picked_up_time",
+            "release_driver": False,
+            "customer_message": (
+                "Your shipment was picked up successfully."
+            ),
+        },
+        "Customer Not Ready": {
+            "allowed": {
+                "Driver Arrived",
+                "Waiting for Customer",
+            },
+            "assignment_status": "Customer Not Ready",
+            "pickup_status": (
+                "Customer Not Ready — Staff Review"
+            ),
+            "shipment_status": (
+                "Customer Not Ready — Staff Review"
+            ),
+            "timestamp_column": "completion_time",
+            "release_driver": True,
+            "customer_message": (
+                "The shipment was not ready for pickup. "
+                "Solomon Shipping staff will follow up."
+            ),
+        },
+        "Customer Requested Reschedule": {
+            "allowed": {
+                "Driver Accepted",
+                "Driver En Route",
+                "Driver Delayed",
+                "Driver Arrived",
+                "Waiting for Customer",
+            },
+            "assignment_status": (
+                "Customer Requested Reschedule"
+            ),
+            "pickup_status": (
+                "Customer Requested Reschedule"
+            ),
+            "shipment_status": (
+                "Pickup Reschedule Requested"
+            ),
+            "timestamp_column": "completion_time",
+            "release_driver": True,
+            "customer_message": (
+                "A pickup reschedule was requested. "
+                "Solomon Shipping staff will confirm a new time."
+            ),
+        },
+        "Address Problem": {
+            "allowed": {
+                "Driver En Route",
+                "Driver Delayed",
+                "Driver Arrived",
+            },
+            "assignment_status": "Address Issue",
+            "pickup_status": (
+                "Address Issue — Staff Review"
+            ),
+            "shipment_status": (
+                "Address Issue — Staff Review"
+            ),
+            "timestamp_column": "completion_time",
+            "release_driver": True,
+            "customer_message": (
+                "The driver reported a pickup-address issue. "
+                "Solomon Shipping staff will follow up."
+            ),
+        },
+        "Unable to Access Property": {
+            "allowed": {
+                "Driver Arrived",
+                "Waiting for Customer",
+            },
+            "assignment_status": "Unable to Access",
+            "pickup_status": (
+                "Unable to Access — Staff Review"
+            ),
+            "shipment_status": (
+                "Unable to Access — Staff Review"
+            ),
+            "timestamp_column": "completion_time",
+            "release_driver": True,
+            "customer_message": (
+                "The driver could not access the pickup location. "
+                "Solomon Shipping staff will follow up."
+            ),
+        },
+        "Vehicle Problem": {
+            "allowed": {
+                "Driver Accepted",
+                "Driver En Route",
+                "Driver Delayed",
+                "Driver Arrived",
+            },
+            "assignment_status": "Vehicle Issue",
+            "pickup_status": (
+                "Vehicle Issue — Reassignment Needed"
+            ),
+            "shipment_status": (
+                "Vehicle Issue — Reassignment Needed"
+            ),
+            "timestamp_column": "completion_time",
+            "release_driver": True,
+            "customer_message": (
+                "A vehicle issue affected this pickup. "
+                "Solomon Shipping is reviewing the assignment."
+            ),
         },
         "Unable to Complete": {
             "allowed": {
                 "Driver Accepted",
                 "Driver En Route",
+                "Driver Delayed",
                 "Driver Arrived",
+                "Waiting for Customer",
             },
             "assignment_status": "Unable to Complete",
             "pickup_status": (
@@ -567,6 +924,11 @@ def update_assignment(
                 "Pickup Issue — Staff Review"
             ),
             "timestamp_column": "completion_time",
+            "release_driver": True,
+            "customer_message": (
+                "The pickup could not be completed. "
+                "Solomon Shipping staff will follow up."
+            ),
         },
     }
 
@@ -576,6 +938,30 @@ def update_assignment(
         )
 
     settings = action_map[action]
+
+    issue_actions = {
+        "Decline Assignment",
+        "Customer Not Ready",
+        "Customer Requested Reschedule",
+        "Address Problem",
+        "Unable to Access Property",
+        "Vehicle Problem",
+        "Unable to Complete",
+    }
+
+    issue_detail = (
+        decline_reason.strip()
+        if action == "Decline Assignment"
+        else notes.strip()
+    )
+
+    if (
+        action in issue_actions
+        and not issue_detail
+    ):
+        raise RuntimeError(
+            "Enter a short reason or note for this update."
+        )
 
     with engine.begin() as connection:
         assignment = connection.execute(
@@ -611,8 +997,7 @@ def update_assignment(
             != driver_id
         ):
             raise RuntimeError(
-                "This assignment belongs to "
-                "another driver."
+                "This assignment belongs to another driver."
             )
 
         current_status = clean(
@@ -638,15 +1023,17 @@ def update_assignment(
             "",
         )
 
-        timestamp_column = settings[
-            "timestamp_column"
-        ]
-
         note_entry = (
             f"[Driver update] {action}"
         )
 
-        if notes.strip():
+        if issue_detail:
+            note_entry += (
+                "\nDetails: "
+                + issue_detail
+            )
+
+        elif notes.strip():
             note_entry += (
                 "\nDriver notes: "
                 + notes.strip()
@@ -663,10 +1050,23 @@ def update_assignment(
             else note_entry
         )
 
-        decline_value = (
-            decline_reason.strip()
-            if action == "Decline Assignment"
-            else None
+        timestamp_column = settings[
+            "timestamp_column"
+        ]
+
+        timestamp_sql = ""
+
+        if timestamp_column:
+            timestamp_sql = (
+                f", {timestamp_column} = "
+                f"COALESCE({timestamp_column}, CURRENT_TIMESTAMP)"
+            )
+
+        close_assignment = (
+            settings["assignment_status"]
+            not in ACTIVE_STATUSES
+            and settings["assignment_status"]
+            not in PENDING_STATUSES
         )
 
         connection.execute(
@@ -675,12 +1075,8 @@ def update_assignment(
                 UPDATE {SCHEMA}.driver_assignments
                 SET
                     assignment_status =
-                        :assignment_status,
-                    {timestamp_column} =
-                        COALESCE(
-                            {timestamp_column},
-                            CURRENT_TIMESTAMP
-                        ),
+                        :assignment_status
+                    {timestamp_sql},
                     decline_reason = CASE
                         WHEN :is_decline
                             THEN :decline_reason
@@ -690,7 +1086,7 @@ def update_assignment(
                     last_status_date =
                         CURRENT_TIMESTAMP,
                     completion_time = CASE
-                        WHEN :is_completed
+                        WHEN :close_assignment
                             THEN COALESCE(
                                 completion_time,
                                 CURRENT_TIMESTAMP
@@ -710,94 +1106,62 @@ def update_assignment(
                 "is_decline": (
                     action == "Decline Assignment"
                 ),
-                "decline_reason": decline_value,
-                "driver_notes": updated_notes,
-                "is_completed": (
-                    action
-                    == "Confirm Picked Up"
+                "decline_reason": (
+                    decline_reason.strip()
+                    if action
+                    == "Decline Assignment"
+                    else None
                 ),
+                "driver_notes": updated_notes,
+                "close_assignment": close_assignment,
                 "assignment_id": assignment_id,
             },
         )
 
-        if action == "Decline Assignment":
-            connection.execute(
-                text(
-                    f"""
-                    UPDATE {SCHEMA}.pickup_schedule
-                    SET
-                        driver_id = NULL,
-                        pickup_status =
-                            :pickup_status,
-                        notes = CASE
-                            WHEN notes IS NULL
-                                 OR BTRIM(notes) = ''
-                                THEN :pickup_note
-                            ELSE notes
-                                || E'\n\n'
-                                || :pickup_note
-                        END,
-                        updated_at =
-                            CURRENT_TIMESTAMP
-                    WHERE
-                        pickup_id = :pickup_id
-                        AND driver_id = :driver_id;
-                    """
-                ),
-                {
-                    "pickup_status": settings[
-                        "pickup_status"
-                    ],
-                    "pickup_note": (
-                        "Driver declined assignment. "
-                        f"Reason: {decline_value}"
-                    ),
-                    "pickup_id": pickup_id,
-                    "driver_id": driver_id,
-                },
-            )
+        pickup_driver_sql = (
+            "driver_id = NULL,"
+            if settings["release_driver"]
+            else ""
+        )
 
-        else:
-            connection.execute(
-                text(
-                    f"""
-                    UPDATE {SCHEMA}.pickup_schedule
-                    SET
-                        pickup_status =
-                            :pickup_status,
-                        notes = CASE
-                            WHEN NULLIF(
-                                :driver_note,
-                                ''
-                            ) IS NULL
-                                THEN notes
-                            WHEN notes IS NULL
-                                 OR BTRIM(notes) = ''
-                                THEN :driver_note
-                            ELSE notes
-                                || E'\n\n'
-                                || :driver_note
-                        END,
-                        updated_at =
-                            CURRENT_TIMESTAMP
-                    WHERE
-                        pickup_id = :pickup_id
-                        AND driver_id = :driver_id;
-                    """
-                ),
-                {
-                    "pickup_status": settings[
-                        "pickup_status"
-                    ],
-                    "driver_note": (
-                        note_entry
-                        if notes.strip()
-                        else ""
-                    ),
-                    "pickup_id": pickup_id,
-                    "driver_id": driver_id,
-                },
-            )
+        connection.execute(
+            text(
+                f"""
+                UPDATE {SCHEMA}.pickup_schedule
+                SET
+                    {pickup_driver_sql}
+                    pickup_status =
+                        :pickup_status,
+                    notes = CASE
+                        WHEN notes IS NULL
+                             OR BTRIM(notes) = ''
+                            THEN :pickup_note
+                        ELSE notes
+                            || E'\n\n'
+                            || :pickup_note
+                    END,
+                    updated_at =
+                        CURRENT_TIMESTAMP
+                WHERE
+                    pickup_id = :pickup_id
+                    AND (
+                        driver_id = :driver_id
+                        OR :release_driver
+                    );
+                """
+            ),
+            {
+                "pickup_status": settings[
+                    "pickup_status"
+                ],
+                "pickup_note": note_entry,
+                "pickup_id": pickup_id,
+                "driver_id": driver_id,
+                "release_driver": settings[
+                    "release_driver"
+                ],
+            },
+        )
 
         connection.execute(
             text(
@@ -825,13 +1189,29 @@ def update_assignment(
             shipment_id,
             settings["shipment_status"],
             driver_name or driver_id,
-            note_entry
-            + (
-                "\nDecline reason: "
-                + decline_value
-                if decline_value
-                else ""
-            ),
+            note_entry,
+        )
+
+        customer_message = settings[
+            "customer_message"
+        ]
+
+        if issue_detail and action in issue_actions:
+            customer_message += (
+                "\nDetails: "
+                + issue_detail
+            )
+
+        insert_pickup_message(
+            connection,
+            shipment_id=shipment_id,
+            pickup_id=pickup_id,
+            sender_role="Driver",
+            sender_id=driver_id,
+            sender_name=driver_name or driver_id,
+            recipient_role="Customer",
+            message_type="Status Update",
+            message_text=customer_message,
         )
 
         if action == "Confirm Picked Up":
@@ -983,7 +1363,7 @@ def render_assignment_details(
             "",
         )
 
-        action_columns = st.columns(2)
+        action_columns = st.columns(3)
 
         address = clean(
             record.get("pickup_address"),
@@ -1004,17 +1384,30 @@ def render_assignment_details(
                     use_container_width=True,
                 )
 
-        with action_columns[1]:
-            if customer_phone:
-                digits = re.sub(
-                    r"\D",
-                    "",
-                    customer_phone,
-                )
+        digits = re.sub(
+            r"\D",
+            "",
+            customer_phone,
+        )
 
+        with action_columns[1]:
+            if digits:
                 st.link_button(
                     "Call Customer",
                     f"tel:{digits}",
+                    use_container_width=True,
+                )
+
+        with action_columns[2]:
+            if digits:
+                sms_body = quote_plus(
+                    "Hello, this is your Solomon Shipping driver "
+                    f"regarding shipment {clean(record.get('shipment_id'))}."
+                )
+
+                st.link_button(
+                    "Text Customer",
+                    f"sms:{digits}?body={sms_body}",
                     use_container_width=True,
                 )
 
@@ -1034,6 +1427,193 @@ def render_assignment_details(
                     "No shipment notes.",
                 )
             )
+
+
+
+def render_customer_communication(
+    engine: Engine,
+    record: dict[str, Any],
+    driver_id: str,
+    driver_name: str,
+) -> None:
+    """Render the in-app driver/customer message thread and send form."""
+
+    pickup_id = clean(
+        record.get("pickup_id"),
+        "",
+    )
+
+    shipment_id = clean(
+        record.get("shipment_id"),
+        "",
+    )
+
+    if not pickup_id or not shipment_id:
+        return
+
+    st.markdown("### Customer Communication")
+
+    st.caption(
+        "Use Call or Text for immediate contact. Messages sent below are "
+        "saved in Neon for the Customer, Staff, and Owner workflow."
+    )
+
+    try:
+        messages = load_pickup_messages(
+            engine,
+            pickup_id,
+        )
+
+    except Exception as exc:
+        st.error(
+            "The message thread could not be loaded."
+        )
+        st.caption(
+            "Technical details: "
+            f"{type(exc).__name__}: "
+            f"{safe_error(exc)}"
+        )
+        messages = pd.DataFrame()
+
+    if messages.empty:
+        st.info(
+            "No in-app messages have been sent for this pickup."
+        )
+
+    else:
+        with st.container(
+            border=True,
+            height=300,
+        ):
+            for _, message in messages.iterrows():
+                sender_role = clean(
+                    message.get("sender_role"),
+                    "System",
+                )
+
+                sender_name = clean(
+                    message.get("sender_name"),
+                    sender_role,
+                )
+
+                created_at = pd.to_datetime(
+                    message.get("created_at"),
+                    errors="coerce",
+                )
+
+                timestamp = (
+                    created_at.strftime(
+                        "%b %d, %Y %I:%M %p"
+                    )
+                    if pd.notna(created_at)
+                    else ""
+                )
+
+                icon = {
+                    "Driver": "🚚",
+                    "Customer": "👤",
+                    "Staff": "🛠️",
+                    "Owner": "👑",
+                    "System": "🔔",
+                }.get(
+                    sender_role,
+                    "💬",
+                )
+
+                st.markdown(
+                    f"**{icon} {sender_name}** "
+                    f"<span style='font-size:0.78rem; "
+                    f"color:#666;'>{timestamp}</span>",
+                    unsafe_allow_html=True,
+                )
+
+                st.write(
+                    clean(
+                        message.get("message_text"),
+                        "",
+                    )
+                )
+
+                st.divider()
+
+    quick_messages = [
+        "I am on my way.",
+        "I have arrived and am outside.",
+        "I rang the bell but did not receive an answer.",
+        "Please have the shipment ready for pickup.",
+        "I am delayed due to traffic.",
+        "Please call me regarding access to the pickup location.",
+        "Your shipment has been picked up.",
+        "Custom message",
+    ]
+
+    with st.form(
+        f"driver_customer_message_{pickup_id}"
+    ):
+        quick_choice = st.selectbox(
+            "Quick Message",
+            quick_messages,
+        )
+
+        custom_message = st.text_area(
+            "Message to Customer",
+            value=(
+                ""
+                if quick_choice
+                == "Custom message"
+                else quick_choice
+            ),
+            height=95,
+            placeholder=(
+                "Write a clear pickup-related message."
+            ),
+        )
+
+        send_left, send_center, send_right = (
+            st.columns([2.1, 1.8, 2.1])
+        )
+
+        with send_center:
+            send_submitted = (
+                st.form_submit_button(
+                    "Send Message",
+                    type="primary",
+                    use_container_width=True,
+                )
+            )
+
+    if send_submitted:
+        if not custom_message.strip():
+            st.error(
+                "Enter a message before sending."
+            )
+
+        else:
+            try:
+                send_driver_message(
+                    engine,
+                    shipment_id=shipment_id,
+                    pickup_id=pickup_id,
+                    driver_id=driver_id,
+                    driver_name=driver_name,
+                    message_text=custom_message,
+                )
+
+                st.success(
+                    "Message sent and saved."
+                )
+                st.rerun()
+
+            except Exception as exc:
+                st.error(
+                    "The message could not be sent."
+                )
+                st.caption(
+                    "Technical details: "
+                    f"{type(exc).__name__}: "
+                    f"{safe_error(exc)}"
+                )
+
 
 
 def select_assignment(
@@ -1211,7 +1791,7 @@ def render_active_assignments(
     driver_id: str,
     driver_name: str,
 ) -> None:
-    """Render accepted and in-progress pickups."""
+    """Render accepted, delayed, waiting, and in-progress pickups."""
 
     if frame.empty:
         st.info(
@@ -1244,14 +1824,42 @@ def render_active_assignments(
     available_actions = {
         "Driver Accepted": [
             "Start Route",
+            "Customer Requested Reschedule",
+            "Vehicle Problem",
             "Unable to Complete",
         ],
         "Driver En Route": [
+            "Traffic Delay",
             "Mark Arrived",
+            "Address Problem",
+            "Vehicle Problem",
+            "Customer Requested Reschedule",
+            "Unable to Complete",
+        ],
+        "Driver Delayed": [
+            "Start Route",
+            "Traffic Delay",
+            "Mark Arrived",
+            "Address Problem",
+            "Vehicle Problem",
             "Unable to Complete",
         ],
         "Driver Arrived": [
+            "Ring Bell — No Answer",
+            "Customer Contacted — Waiting",
             "Confirm Picked Up",
+            "Customer Not Ready",
+            "Customer Requested Reschedule",
+            "Unable to Access Property",
+            "Unable to Complete",
+        ],
+        "Waiting for Customer": [
+            "Ring Bell — No Answer",
+            "Customer Contacted — Waiting",
+            "Confirm Picked Up",
+            "Customer Not Ready",
+            "Customer Requested Reschedule",
+            "Unable to Access Property",
             "Unable to Complete",
         ],
     }.get(
@@ -1265,6 +1873,8 @@ def render_active_assignments(
         )
         return
 
+    st.markdown("### Update Pickup Status")
+
     with st.form(
         "driver_status_update_form"
     ):
@@ -1274,11 +1884,12 @@ def render_active_assignments(
         )
 
         notes = st.text_area(
-            "Driver Notes",
+            "Driver Notes / Reason",
             placeholder=(
-                "Optional notes for staff and the owner."
+                "Required for issues, delays, access problems, "
+                "reschedules, or unsuccessful pickup attempts."
             ),
-            height=100,
+            height=110,
         )
 
         submitted = st.form_submit_button(
@@ -1315,6 +1926,15 @@ def render_active_assignments(
                 f"{type(exc).__name__}: "
                 f"{safe_error(exc)}"
             )
+
+    st.divider()
+
+    render_customer_communication(
+        engine,
+        record,
+        driver_id,
+        driver_name,
+    )
 
 
 def main() -> None:
@@ -1361,7 +1981,7 @@ def main() -> None:
         title=f"Driver Portal — {driver_name}",
         subtitle=(
             "Review assigned pickups, accept or decline new work, "
-            "open directions, and update live pickup progress."
+            "call or message customers, and send detailed live pickup updates."
         ),
     )
 

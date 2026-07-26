@@ -29,7 +29,15 @@ PICKUP_STATUSES = [
     "Pending Driver Acceptance",
     "Driver Accepted",
     "Driver En Route",
+    "Driver Delayed — Traffic",
     "Driver Arrived",
+    "Driver Waiting — No Answer",
+    "Driver Waiting for Customer",
+    "Customer Not Ready — Staff Review",
+    "Customer Requested Reschedule",
+    "Address Issue — Staff Review",
+    "Unable to Access — Staff Review",
+    "Vehicle Issue — Reassignment Needed",
     "Driver Declined — Reassignment Needed",
     "Pickup Issue — Staff Review",
     "Picked Up",
@@ -58,7 +66,10 @@ SCHEDULED_PICKUP_STATUSES = {
     "pending driver acceptance",
     "driver accepted",
     "driver en route",
+    "driver delayed — traffic",
     "driver arrived",
+    "driver waiting — no answer",
+    "driver waiting for customer",
 }
 
 CLOSED_PICKUP_STATUSES = {
@@ -1026,7 +1037,9 @@ def save_pickup(
                             'Pending Driver Acceptance',
                             'Driver Accepted',
                             'Driver En Route',
-                            'Driver Arrived'
+                            'Driver Delayed',
+                            'Driver Arrived',
+                            'Waiting for Customer'
                         )
                     ORDER BY assigned_date DESC
                     LIMIT 1;
@@ -1196,7 +1209,9 @@ def save_pickup(
                             'Pending Driver Acceptance',
                             'Driver Accepted',
                             'Driver En Route',
-                            'Driver Arrived'
+                            'Driver Delayed',
+                            'Driver Arrived',
+                            'Waiting for Customer'
                         );
                     """
                 ),
@@ -1239,7 +1254,9 @@ def save_pickup(
                             'Pending Driver Acceptance',
                             'Driver Accepted',
                             'Driver En Route',
-                            'Driver Arrived'
+                            'Driver Delayed',
+                            'Driver Arrived',
+                            'Waiting for Customer'
                         );
                     """
                 ),
@@ -1314,9 +1331,33 @@ def save_pickup(
             ),
             "Driver Accepted": "Driver Accepted",
             "Driver En Route": "Driver En Route",
+            "Driver Delayed — Traffic": (
+                "Driver Delayed — Traffic"
+            ),
             "Driver Arrived": "Driver Arrived",
+            "Driver Waiting — No Answer": (
+                "Driver Waiting — No Answer"
+            ),
+            "Driver Waiting for Customer": (
+                "Driver Waiting for Customer"
+            ),
             "Driver Declined — Reassignment Needed": (
                 "Driver Reassignment Needed"
+            ),
+            "Customer Not Ready — Staff Review": (
+                "Customer Not Ready — Staff Review"
+            ),
+            "Customer Requested Reschedule": (
+                "Pickup Reschedule Requested"
+            ),
+            "Address Issue — Staff Review": (
+                "Address Issue — Staff Review"
+            ),
+            "Unable to Access — Staff Review": (
+                "Unable to Access — Staff Review"
+            ),
+            "Vehicle Issue — Reassignment Needed": (
+                "Vehicle Issue — Reassignment Needed"
             ),
             "Pickup Issue — Staff Review": (
                 "Pickup Issue — Staff Review"
