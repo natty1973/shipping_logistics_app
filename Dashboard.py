@@ -35,6 +35,15 @@ STAFF_PASSWORD = "staff2026"
 OWNER_USERNAME = "owner"
 OWNER_PASSWORD = "solomon2026"
 
+# Temporary shared Driver Portal login for the MVP.
+# Later, replace this with individual driver usernames and password hashes.
+DRIVER_USERNAME = "driver"
+DRIVER_PASSWORD = "driver2026"
+
+# The shared login will open this driver when the record exists.
+# If it does not exist, the first Active or Backup driver in Neon is used.
+DEFAULT_DRIVER_ID = "DRV-001"
+
 
 # ---------------------------------------------------------
 # Live Neon / PostgreSQL Dashboard Data
@@ -602,14 +611,21 @@ def normalize_phone(
 
 
 def authenticate_driver(
-    driver_id: str,
-    phone: str,
+    username: str,
+    password: str,
 ) -> dict[str, Any] | None:
-    """Validate a driver against the active Neon driver directory."""
+    """
+    Validate the temporary shared Driver Portal username and password.
 
-    cleaned_driver_id = driver_id.strip()
+    After the shared credentials are accepted, the session is linked to
+    DEFAULT_DRIVER_ID when that active driver exists. Otherwise, the first
+    Active or Backup driver in Neon is used so the MVP can be tested.
+    """
 
-    if not cleaned_driver_id or not phone.strip():
+    if (
+        username.strip() != DRIVER_USERNAME
+        or password != DRIVER_PASSWORD
+    ):
         return None
 
     engine = get_database_engine()
@@ -624,41 +640,72 @@ def authenticate_driver(
                     phone,
                     active_status
                 FROM {DATABASE_SCHEMA}.drivers
-                WHERE UPPER(BTRIM(driver_id)) =
-                    UPPER(BTRIM(:driver_id))
+                WHERE
+                    UPPER(BTRIM(driver_id)) =
+                        UPPER(BTRIM(:default_driver_id))
+                    AND LOWER(
+                        BTRIM(
+                            COALESCE(
+                                active_status,
+                                ''
+                            )
+                        )
+                    ) IN (
+                        'active',
+                        'backup'
+                    )
                 LIMIT 1;
                 """
             ),
             {
-                "driver_id": cleaned_driver_id
+                "default_driver_id": (
+                    DEFAULT_DRIVER_ID
+                )
             },
         ).mappings().first()
 
+        if driver is None:
+            driver = connection.execute(
+                text(
+                    f"""
+                    SELECT
+                        driver_id,
+                        driver_name,
+                        phone,
+                        active_status
+                    FROM {DATABASE_SCHEMA}.drivers
+                    WHERE LOWER(
+                        BTRIM(
+                            COALESCE(
+                                active_status,
+                                ''
+                            )
+                        )
+                    ) IN (
+                        'active',
+                        'backup'
+                    )
+                    ORDER BY
+                        CASE
+                            WHEN LOWER(
+                                BTRIM(active_status)
+                            ) = 'active'
+                                THEN 1
+                            ELSE 2
+                        END,
+                        driver_name,
+                        driver_id
+                    LIMIT 1;
+                    """
+                )
+            ).mappings().first()
+
     if driver is None:
-        return None
-
-    active_status = str(
-        driver.get("active_status")
-        or ""
-    ).strip().lower()
-
-    if active_status not in {
-        "active",
-        "backup",
-    }:
-        return None
-
-    stored_phone = normalize_phone(
-        driver.get("phone")
-    )
-
-    entered_phone = normalize_phone(phone)
-
-    if (
-        not stored_phone
-        or stored_phone != entered_phone
-    ):
-        return None
+        raise RuntimeError(
+            "No Active or Backup driver exists in "
+            "solomon_shipping.drivers. Add a driver "
+            "record before using Driver Portal."
+        )
 
     return dict(driver)
 
@@ -1216,7 +1263,7 @@ def staff_login_page() -> None:
 
 
 def driver_login_page() -> None:
-    """Driver login using the Driver ID and telephone number on file."""
+    """Temporary shared username-and-password login for the Driver Portal."""
 
     apply_custom_styles()
 
@@ -1252,12 +1299,13 @@ def driver_login_page() -> None:
             with st.form(
                 "driver_login_form"
             ):
-                driver_id = st.text_input(
-                    "Driver ID"
+                username = st.text_input(
+                    "Username"
                 )
 
-                phone = st.text_input(
-                    "Telephone Number"
+                password = st.text_input(
+                    "Password",
+                    type="password",
                 )
 
                 submitted = (
@@ -1267,11 +1315,16 @@ def driver_login_page() -> None:
                     )
                 )
 
+            st.caption(
+                "Temporary MVP login. Individual driver "
+                "accounts will be added later."
+            )
+
             if submitted:
                 try:
                     driver = authenticate_driver(
-                        driver_id,
-                        phone,
+                        username,
+                        password,
                     )
 
                 except Exception as exc:
@@ -1287,8 +1340,7 @@ def driver_login_page() -> None:
                 else:
                     if driver is None:
                         st.error(
-                            "The Driver ID and telephone number "
-                            "do not match an active driver record."
+                            "Invalid driver username or password."
                         )
 
                     else:
