@@ -739,7 +739,9 @@ def load_driver_home_counts(
                         WHERE assignment_status IN (
                             'Driver Accepted',
                             'Driver En Route',
-                            'Driver Arrived'
+                            'Driver Delayed',
+                            'Driver Arrived',
+                            'Waiting for Customer'
                         )
                     ) AS active_pickups,
 
@@ -843,7 +845,9 @@ def render_driver_activity(
             [
                 "Driver Accepted",
                 "Driver En Route",
+                "Driver Delayed",
                 "Driver Arrived",
+                "Waiting for Customer",
             ]
         )
         .sum()
@@ -854,6 +858,11 @@ def render_driver_activity(
         .isin(
             [
                 "Driver Declined",
+                "Customer Requested Reschedule",
+                "Customer Not Ready",
+                "Address Issue",
+                "Unable to Access",
+                "Vehicle Issue",
                 "Unable to Complete",
             ]
         )
