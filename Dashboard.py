@@ -741,7 +741,8 @@ def load_driver_home_counts(
                             'Driver En Route',
                             'Driver Delayed',
                             'Driver Arrived',
-                            'Waiting for Customer'
+                            'Waiting for Customer',
+                            'Picked Up'
                         )
                     ) AS active_pickups,
 
@@ -848,6 +849,7 @@ def render_driver_activity(
                 "Driver Delayed",
                 "Driver Arrived",
                 "Waiting for Customer",
+                "Picked Up",
             ]
         )
         .sum()

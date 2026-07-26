@@ -3441,6 +3441,51 @@ def latest_text_value(
 
 
 
+PICKUP_AREA_CITY_DEFAULTS = {
+    "Warehouse Drop-Off — Orange, NJ": "Orange",
+    "New Jersey — Orange": "Orange",
+    "New Jersey — Newark": "Newark",
+    "New Jersey — Jersey City": "Jersey City",
+    "New Jersey — Secaucus": "Secaucus",
+    "New Jersey — Bayonne": "Bayonne",
+    "New Jersey — Central NJ / Raritan": "Raritan",
+    "New York — Queens": "Queens",
+    "New York — Brooklyn": "Brooklyn",
+    "New York — Bronx": "Bronx",
+    "New York — Manhattan": "Manhattan",
+    "New York — Staten Island": "Staten Island",
+    "New York — Long Island": "Long Island",
+}
+
+
+def resolved_pickup_city(
+    pickup_city_value: Any,
+    pickup_area_value: Any,
+    saved_value: Any = "",
+) -> str:
+    """
+    Return the typed Pickup City or infer it from the selected pickup zone.
+
+    Some browsers visually autofill a city without firing the input event that
+    Streamlit needs. When that happens, the selected pickup zone provides a
+    safe fallback. "Other" still requires the customer to type the city.
+    """
+
+    typed_city = latest_text_value(
+        "request_pickup_city",
+        pickup_city_value,
+        saved_value,
+    )
+
+    if typed_city:
+        return typed_city
+
+    return PICKUP_AREA_CITY_DEFAULTS.get(
+        str(pickup_area_value or "").strip(),
+        "",
+    )
+
+
 def main() -> None:
     apply_custom_styles()
     sidebar_shipping_options()
@@ -3544,6 +3589,11 @@ def main() -> None:
             pickup_city = st.text_input(
                 "Pickup City *",
                 key="request_pickup_city",
+                help=(
+                    "Enter the city. If browser autofill does not "
+                    "send the value, the selected pickup zone will "
+                    "be used as a fallback."
+                ),
             )
             pickup_state = st.text_input(
                 "Pickup State *",
@@ -3827,10 +3877,25 @@ def main() -> None:
             "request_pickup_address",
             pickup_address,
         )
-        pickup_city = latest_text_value(
-            "request_pickup_city",
+        pickup_city = resolved_pickup_city(
             pickup_city,
+            pickup_area,
         )
+
+        if (
+            pickup_city
+            and not latest_text_value(
+                "request_pickup_city",
+                st.session_state.get(
+                    "request_pickup_city",
+                    "",
+                ),
+            )
+        ):
+            st.caption(
+                "Pickup City was confirmed from the selected "
+                f"pickup zone: {pickup_city}."
+            )
         pickup_state = latest_text_value(
             "request_pickup_state",
             pickup_state,
@@ -4100,9 +4165,9 @@ def main() -> None:
                         "",
                     ),
                 ),
-                "pickup_city": latest_text_value(
-                    "request_pickup_city",
+                "pickup_city": resolved_pickup_city(
                     pickup_city,
+                    pickup_area,
                     pending_request.get(
                         "pickup_city",
                         "",
