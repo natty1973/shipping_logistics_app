@@ -3411,6 +3411,36 @@ def load_available_pickup_slots(
 
 
 
+
+def latest_text_value(
+    widget_key: str,
+    local_value: Any,
+    saved_value: Any = "",
+) -> str:
+    """
+    Return the latest nonblank value for a request text field.
+
+    Stable widget keys preserve the visible values through the Calculate and
+    Submit reruns. The saved estimate snapshot remains a final fallback.
+    """
+
+    for candidate in (
+        st.session_state.get(widget_key),
+        local_value,
+        saved_value,
+    ):
+        if candidate is None:
+            continue
+
+        value = str(candidate).strip()
+
+        if value:
+            return value
+
+    return ""
+
+
+
 def main() -> None:
     apply_custom_styles()
     sidebar_shipping_options()
@@ -3455,13 +3485,16 @@ def main() -> None:
 
         with customer_col1:
             customer_name = st.text_input(
-                "Full Name *"
+                "Full Name *",
+                key="request_customer_name",
             )
             phone = st.text_input(
-                "Phone Number *"
+                "Phone Number *",
+                key="request_phone",
             )
             email = st.text_input(
-                "Email Address"
+                "Email Address",
+                key="request_email",
             )
 
         with customer_col2:
@@ -3489,6 +3522,7 @@ def main() -> None:
                     == "Customer Portal"
                     else portal_label
                 ),
+                key="request_entered_by",
             )
 
         st.divider()
@@ -3504,17 +3538,21 @@ def main() -> None:
 
         with pickup_col1:
             pickup_address = st.text_input(
-                "Pickup Address *"
+                "Pickup Address *",
+                key="request_pickup_address",
             )
             pickup_city = st.text_input(
-                "Pickup City *"
+                "Pickup City *",
+                key="request_pickup_city",
             )
             pickup_state = st.text_input(
                 "Pickup State *",
                 value="NJ",
+                key="request_pickup_state",
             )
             pickup_zip = st.text_input(
-                "Pickup ZIP Code"
+                "Pickup ZIP Code",
+                key="request_pickup_zip",
             )
 
         with pickup_col2:
@@ -3617,6 +3655,7 @@ def main() -> None:
                 "parking instructions, or best contact person."
             ),
             height=90,
+            key="request_pickup_notes",
         )
 
         st.divider()
@@ -3634,7 +3673,8 @@ def main() -> None:
                 DESTINATION_COUNTRIES,
             )
             destination_city = st.text_input(
-                "Destination City / Area *"
+                "Destination City / Area *",
+                key="request_destination_city",
             )
             destination_zone = st.selectbox(
                 "Guyana Destination Zone",
@@ -3643,10 +3683,12 @@ def main() -> None:
 
         with destination_col2:
             recipient_name = st.text_input(
-                "Recipient Name *"
+                "Recipient Name *",
+                key="request_recipient_name",
             )
             recipient_phone = st.text_input(
-                "Recipient Phone Number *"
+                "Recipient Phone Number *",
+                key="request_recipient_phone",
             )
             delivery_method = st.selectbox(
                 "Delivery Method in Guyana",
@@ -3716,6 +3758,7 @@ def main() -> None:
                 "or special requests."
             ),
             height=100,
+            key="request_shipment_notes",
         )
 
         st.divider()
@@ -3738,6 +3781,7 @@ def main() -> None:
                 "receiver pays the balance in Guyana."
             ),
             height=75,
+            key="request_payment_notes",
         )
 
         st.caption(
@@ -3761,6 +3805,93 @@ def main() -> None:
                     )
                 ),
             )
+
+    if calculate_submitted:
+        customer_name = latest_text_value(
+            "request_customer_name",
+            customer_name,
+        )
+        phone = latest_text_value(
+            "request_phone",
+            phone,
+        )
+        email = latest_text_value(
+            "request_email",
+            email,
+        )
+        requested_by = latest_text_value(
+            "request_entered_by",
+            requested_by,
+        )
+        pickup_address = latest_text_value(
+            "request_pickup_address",
+            pickup_address,
+        )
+        pickup_city = latest_text_value(
+            "request_pickup_city",
+            pickup_city,
+        )
+        pickup_state = latest_text_value(
+            "request_pickup_state",
+            pickup_state,
+        )
+        pickup_zip = latest_text_value(
+            "request_pickup_zip",
+            pickup_zip,
+        )
+        pickup_notes = latest_text_value(
+            "request_pickup_notes",
+            pickup_notes,
+        )
+        destination_city = latest_text_value(
+            "request_destination_city",
+            destination_city,
+        )
+        recipient_name = latest_text_value(
+            "request_recipient_name",
+            recipient_name,
+        )
+        recipient_phone = latest_text_value(
+            "request_recipient_phone",
+            recipient_phone,
+        )
+        shipment_notes = latest_text_value(
+            "request_shipment_notes",
+            shipment_notes,
+        )
+        payment_notes = latest_text_value(
+            "request_payment_notes",
+            payment_notes,
+        )
+
+        calculate_required_fields = {
+            "Full Name": customer_name,
+            "Phone Number": phone,
+            "Pickup Address": pickup_address,
+            "Pickup City": pickup_city,
+            "Pickup State": pickup_state,
+            "Destination City": destination_city,
+            "Recipient Name": recipient_name,
+            "Recipient Phone Number": recipient_phone,
+        }
+
+        calculate_missing_fields = [
+            label
+            for label, value
+            in calculate_required_fields.items()
+            if not str(value).strip()
+        ]
+
+        if calculate_missing_fields:
+            st.error(
+                "Please complete these required fields before "
+                "calculating the approximate cost: "
+                + ", ".join(
+                    calculate_missing_fields
+                )
+                + "."
+            )
+            calculate_submitted = False
 
     if calculate_submitted:
         quote = calculate_estimated_quote(
@@ -3925,26 +4056,124 @@ def main() -> None:
                 **pending_request,
                 "entered_from_portal": portal_label,
                 "requested_by": (
-                    requested_by.strip()
+                    latest_text_value(
+                        "request_entered_by",
+                        requested_by,
+                        pending_request.get(
+                            "requested_by",
+                            "",
+                        ),
+                    )
                     or portal_label
                 ),
-                "customer_name": customer_name.strip(),
-                "phone": phone.strip(),
-                "email": email.strip(),
+                "customer_name": latest_text_value(
+                    "request_customer_name",
+                    customer_name,
+                    pending_request.get(
+                        "customer_name",
+                        "",
+                    ),
+                ),
+                "phone": latest_text_value(
+                    "request_phone",
+                    phone,
+                    pending_request.get(
+                        "phone",
+                        "",
+                    ),
+                ),
+                "email": latest_text_value(
+                    "request_email",
+                    email,
+                    pending_request.get(
+                        "email",
+                        "",
+                    ),
+                ),
                 "customer_type": customer_type,
                 "preferred_contact": preferred_contact,
-                "pickup_address": pickup_address.strip(),
-                "pickup_city": pickup_city.strip(),
-                "pickup_state": pickup_state.strip(),
-                "pickup_zip": pickup_zip.strip(),
+                "pickup_address": latest_text_value(
+                    "request_pickup_address",
+                    pickup_address,
+                    pending_request.get(
+                        "pickup_address",
+                        "",
+                    ),
+                ),
+                "pickup_city": latest_text_value(
+                    "request_pickup_city",
+                    pickup_city,
+                    pending_request.get(
+                        "pickup_city",
+                        "",
+                    ),
+                ),
+                "pickup_state": latest_text_value(
+                    "request_pickup_state",
+                    pickup_state,
+                    pending_request.get(
+                        "pickup_state",
+                        "",
+                    ),
+                ),
+                "pickup_zip": latest_text_value(
+                    "request_pickup_zip",
+                    pickup_zip,
+                    pending_request.get(
+                        "pickup_zip",
+                        "",
+                    ),
+                ),
                 "pickup_flexibility": pickup_flexibility,
-                "pickup_notes": pickup_notes.strip(),
-                "destination_city": destination_city.strip(),
-                "recipient_name": recipient_name.strip(),
-                "recipient_phone": recipient_phone.strip(),
-                "shipment_notes": shipment_notes.strip(),
+                "pickup_notes": latest_text_value(
+                    "request_pickup_notes",
+                    pickup_notes,
+                    pending_request.get(
+                        "pickup_notes",
+                        "",
+                    ),
+                ),
+                "destination_city": latest_text_value(
+                    "request_destination_city",
+                    destination_city,
+                    pending_request.get(
+                        "destination_city",
+                        "",
+                    ),
+                ),
+                "recipient_name": latest_text_value(
+                    "request_recipient_name",
+                    recipient_name,
+                    pending_request.get(
+                        "recipient_name",
+                        "",
+                    ),
+                ),
+                "recipient_phone": latest_text_value(
+                    "request_recipient_phone",
+                    recipient_phone,
+                    pending_request.get(
+                        "recipient_phone",
+                        "",
+                    ),
+                ),
+                "shipment_notes": latest_text_value(
+                    "request_shipment_notes",
+                    shipment_notes,
+                    pending_request.get(
+                        "shipment_notes",
+                        "",
+                    ),
+                ),
                 "payment_terms": payment_terms,
-                "payment_notes": payment_notes.strip(),
+                "payment_notes": latest_text_value(
+                    "request_payment_notes",
+                    payment_notes,
+                    pending_request.get(
+                        "payment_notes",
+                        "",
+                    ),
+                ),
             }
 
             st.session_state.pending_shipment_request = (
